@@ -20,6 +20,8 @@ def test_env_example_satisfies_every_required_setting() -> None:
     assert settings.redis_ttl_seconds == 1800
     assert settings.devices_api_path == "/api/devices"
     assert settings.current_readings_api_path == "/api/readings/latest"
+    assert settings.historical_readings_api_path == "/api/telemetry/daily-averages"
+    assert settings.plant_timezone == "Africa/Cairo"
 
 
 def test_env_example_leaves_the_vllm_only_knobs_unset() -> None:
@@ -43,3 +45,12 @@ def test_missing_key_fails_fast_rather_than_defaulting() -> None:
     env = {key: value for key, value in BASE_ENV.items() if key != "REDIS_URL"}
     with pytest.raises(ValidationError, match="REDIS_URL"):
         Settings(_env_file=None, **env)  # type: ignore[arg-type]
+
+
+def test_the_new_historical_settings_are_required_without_in_code_defaults() -> None:
+    from tests.settings_factory import BASE_ENV
+
+    for key in ("HISTORICAL_READINGS_API_PATH", "PLANT_TIMEZONE"):
+        env = {item: value for item, value in BASE_ENV.items() if item != key}
+        with pytest.raises(ValidationError, match=key):
+            Settings(_env_file=None, **env)  # type: ignore[arg-type]

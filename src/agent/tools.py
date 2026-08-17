@@ -1,4 +1,4 @@
-"""The two tools exposed to the LLM, built fresh for each request.
+"""The three tools exposed to the LLM, built fresh for each request.
 
 The JWT is deliberately absent from every schema below. It is held on the request
 context rather than on a pydantic field, so the model can neither see it nor be
@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any
 
 from crewai.tools import BaseTool
@@ -22,6 +23,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 from core.config import Settings
 from core.logging import json_preview
 from services.devices import get_devices
+from services.history import get_historical_readings
 from services.mbbr_api import MBBRAPIError
 from services.readings import get_current_readings
 
@@ -29,9 +31,15 @@ logger = logging.getLogger(__name__)
 
 GET_DEVICES = "get_devices"
 GET_CURRENT_READINGS = "get_current_readings"
+GET_HISTORICAL_READINGS = "get_historical_readings"
 
 TOOL_FAILED_RESULT = "Tool failed temporarily."
 DEVICE_NOT_FOUND_RESULT = "Device not found."
+INVALID_RANGE_RESULT = "Invalid date range."
+RANGE_TOO_LONG_RESULT = "Range too long."
+
+# Not 30, so «الشهر اللي فات» for a 31-day month is not rejected on an off-by-one.
+MAX_RANGE_DAYS = 31
 
 
 def resolve_device_id(raw_device_id: str, devices: list[dict[str, Any]]) -> str | None:
@@ -63,13 +71,42 @@ def resolve_device_id(raw_device_id: str, devices: list[dict[str, Any]]) -> str 
     return None
 
 
+def parse_date_range(raw_from: str, raw_to: str, today: date) -> tuple[date, date] | None:
+    """Parse the model's two dates, or None if they are not a usable past window.
+
+    Strict on purpose, in the spirit of `resolve_device_id`. `strptime` with an
+    exact format — not `date.fromisoformat`, which would also accept `20260816`
+    and let a shape the API rejects through.
+
+    `None` on: unparseable input, `start > end`, or `start` in the future. A
+    `to` that overshoots today (e.g. "this month" → end of month) is clamped to
+    today, losslessly — there is no future data, so this just avoids failing the
+    operator over an off-by-one. Span is checked by the caller, so "malformed"
+    and "too long" stay distinguishable.
+    """
+    def parse(value: str) -> date | None:
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    start = parse(raw_from)
+    end = parse(raw_to)
+    if start is None or end is None:
+        return None
+    if start > end or start > today:
+        return None
+    return start, min(end, today)
+
+
 @dataclass
 class ToolContext:
-    """Per-request state the two tools share: the credentials and this turn's
-    device list, fetched once so get_current_readings need not fetch it again."""
+    """Per-request state the tools share: the credentials and this turn's
+    device list, fetched once so the readings tools need not fetch it again."""
 
     jwt: str
     settings: Settings
+    today: date
     devices: list[dict[str, Any]] | None = None
 
 
@@ -119,7 +156,8 @@ class GetDevicesTool(_ContextBoundTool):
     name: str = GET_DEVICES
     description: str = (
         "List the plant's devices with their real ids and names. "
-        "Call this before get_current_readings, every time."
+        "Call this before get_current_readings or get_historical_readings, "
+        "every time."
     )
     args_schema: type[BaseModel] = _NoArguments
 
@@ -183,6 +221,73 @@ class GetCurrentReadingsTool(_ContextBoundTool):
         return json.dumps(readings, ensure_ascii=False)
 
 
+class _HistoricalReadingsArguments(BaseModel):
+    device_id: str = Field(
+        ...,
+        description=(
+            "The real device id copied from the get_devices result. "
+            "This must be an id, not the device name."
+        ),
+    )
+    from_date: str = Field(
+        ...,
+        description="First day of the period, YYYY-MM-DD. Inclusive.",
+    )
+    to_date: str = Field(
+        ...,
+        description="Last day of the period, YYYY-MM-DD. Inclusive.",
+    )
+
+
+class GetHistoricalReadingsTool(_ContextBoundTool):
+    name: str = GET_HISTORICAL_READINGS
+    description: str = (
+        "Daily average sensor readings for one device over a past period — "
+        "yesterday, a past week, a month, or a named date range. "
+        "Never use this for the current or latest value; use "
+        "get_current_readings for that."
+    )
+    args_schema: type[BaseModel] = _HistoricalReadingsArguments
+
+    def _run(self, device_id: str, from_date: str, to_date: str) -> str:
+        logger.info("tool_call_started tool_name=%s", self.name)
+
+        devices = self._context.devices
+        if devices is None:
+            devices = self._fetch_devices()
+            if devices is None:
+                return TOOL_FAILED_RESULT
+
+        real_device_id = resolve_device_id(device_id, devices)
+        if real_device_id is None:
+            logger.warning("device_not_found devices=%s", len(devices))
+            return DEVICE_NOT_FOUND_RESULT
+
+        date_range = parse_date_range(from_date, to_date, self._context.today)
+        if date_range is None:
+            return INVALID_RANGE_RESULT
+        start, end = date_range
+        if (end - start).days >= MAX_RANGE_DAYS:
+            return RANGE_TOO_LONG_RESULT
+
+        readings = self._call(
+            get_historical_readings(
+                self._context.jwt, real_device_id, start, end, self._context.settings
+            )
+        )
+        if readings is None:
+            return TOOL_FAILED_RESULT
+
+        logger.info(
+            "tool_call_completed tool_name=%s result=%s", self.name, json_preview(readings)
+        )
+        return json.dumps(readings, ensure_ascii=False)
+
+
 def build_tools(context: ToolContext) -> list[BaseTool]:
-    """One fresh pair of tools sharing this request's context."""
-    return [GetDevicesTool(context), GetCurrentReadingsTool(context)]
+    """One fresh set of tools sharing this request's context."""
+    return [
+        GetDevicesTool(context),
+        GetCurrentReadingsTool(context),
+        GetHistoricalReadingsTool(context),
+    ]

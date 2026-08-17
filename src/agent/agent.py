@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from crewai import LLM, Agent
 from crewai.events.event_listener import EventListener
@@ -12,7 +14,9 @@ from services.memory import MemoryMessage
 
 logger = logging.getLogger(__name__)
 
-MAX_ITER = 3
+# With three tools the model can reach for the wrong one on its first try, so
+# the run budget has to stretch past get_devices → wrong tool → correct tool.
+MAX_ITER = 4
 FALLBACK_RESPONSE = "معلش، مش قادر أوصل لإجابة واضحة دلوقتي."
 
 
@@ -27,7 +31,7 @@ def silence_crewai_console() -> None:
 
 
 class MBBRAgent:
-    """Runs one turn as a single CrewAI agent over the two MBBR tools.
+    """Runs one turn as a single CrewAI agent over the MBBR tools.
 
     Which device the operator means, how they spelled it, and whether it carries
     over from the previous question are all the model's to work out from the
@@ -51,10 +55,14 @@ class MBBRAgent:
         history: list[MemoryMessage],
         user_message: str,
     ) -> str:
-        context = ToolContext(jwt=jwt, settings=self._settings)
+        # "Today" is computed once per turn so the prompt's "# Today" line and
+        # the historical tool's date gate always agree. ZoneInfo (stdlib) makes
+        # "امبارح" mean the operator's yesterday, not the server's.
+        today = datetime.now(ZoneInfo(self._settings.plant_timezone)).date()
+        context = ToolContext(jwt=jwt, settings=self._settings, today=today)
         try:
             raw = await asyncio.to_thread(
-                self._kickoff, build_input(history, user_message), context
+                self._kickoff, build_input(history, user_message, today), context
             )
         except Exception as exc:
             # Everything below is infrastructure: the model, the transport, or a

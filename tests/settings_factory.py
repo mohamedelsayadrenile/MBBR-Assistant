@@ -40,6 +40,8 @@ BASE_ENV: dict[str, Any] = {
     "MBBR_API_BASE_URL": "http://mbbr.test",
     "DEVICES_API_PATH": "/api/devices",
     "CURRENT_READINGS_API_PATH": "/api/readings/latest",
+    "HISTORICAL_READINGS_API_PATH": "/api/telemetry/daily-averages",
+    "PLANT_TIMEZONE": "Africa/Cairo",
     "HTTP_TIMEOUT_SECONDS": 30,
 }
 

@@ -29,7 +29,7 @@ src/
 ├── agent/
 │   ├── agent.py        # one CrewAI agent, built per request
 │   ├── llm.py          # crewai.LLM from settings, LLMError, <think> stripping
-│   ├── tools.py        # the two tools, per-request context, id validation
+│   ├── tools.py        # the three tools, per-request context, id + date validation
 │   └── prompts.py      # Egyptian Arabic system prompt + turn rendering
 ├── services/
 │   ├── asr/            # interface + factory + providers/cohere.py
@@ -37,6 +37,7 @@ src/
 │   ├── mbbr_api.py     # shared GET + Bearer auth + envelope unwrapping
 │   ├── devices.py      # get_devices(jwt, settings)
 │   ├── readings.py     # get_current_readings(jwt, device_id, settings)
+│   ├── history.py      # get_historical_readings(jwt, device_id, start, end, settings)
 │   ├── memory.py       # RedisMemory
 │   └── chat_service.py # one turn: memory → agent → memory → speech
 ├── api/v1/endpoints/{chat.py,voices.py}
@@ -181,10 +182,22 @@ or a cloned voice, and startup fails if it names neither.
 
 ## Agent tools
 
-Two tools are exposed to the model:
+Three tools are exposed to the model:
 
 - `get_devices()` — the plant's real devices, as `{id, name}`.
 - `get_current_readings(device_id)` — the latest readings for one device.
+- `get_historical_readings(device_id, from_date, to_date)` — daily-average sensor
+  readings for one device over a past period (up to a month), for questions about
+  «امبارح»، «الأسبوع اللي فات»، «الشهر اللي فات»، or a named date range.
+
+The prompt routes on time words: a question with no time word is a current
+question and uses `get_current_readings`; one with a past time word uses
+`get_historical_readings`. The model turns the operator's wording into
+`from_date`/`to_date` off a `# Today` line injected into each turn, and
+`parse_date_range` in [tools.py](src/agent/tools.py) validates it strictly. The
+one-sentence reply for a past period is the average of the days' avg values plus
+the min–max; a sensor with an empty `daily` list is different from one absent
+from `sensors` entirely.
 
 **The JWT is never in a tool schema, a prompt, Redis, or a log line.** The tools
 are constructed fresh for each request with the JWT on a private attribute, which
@@ -200,7 +213,7 @@ friends), because the operator already knows the device they mean.
 
 The operator's answer ("جهاز 2") arrives on a later turn than the device list, and
 Redis holds only user/assistant text. Rather than a second store, the prompt
-requires `get_devices` before every `get_current_readings`, which puts a fresh list
+requires `get_devices` before every readings tool, which puts a fresh list
 in the current turn.
 
 ### The device the conversation is about

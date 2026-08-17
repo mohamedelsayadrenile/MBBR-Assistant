@@ -1,12 +1,17 @@
+from datetime import date
+
 import pytest
 
 from agent.prompts import (
     ASK_WHICH_DEVICE,
+    ASK_WHICH_PERIOD,
     CURRENT_HEADER,
     DEVICE_NOT_FOUND,
     HISTORY_HEADER,
+    NO_HISTORY,
     NO_READINGS,
     OUT_OF_SCOPE,
+    PERIOD_TOO_LONG,
     SYSTEM_PROMPT,
     TOOL_FAILURE_REPLY,
     build_input,
@@ -17,9 +22,14 @@ FIXED_REPLIES = [
     ASK_WHICH_DEVICE,
     DEVICE_NOT_FOUND,
     NO_READINGS,
+    NO_HISTORY,
     OUT_OF_SCOPE,
     TOOL_FAILURE_REPLY,
+    PERIOD_TOO_LONG,
+    ASK_WHICH_PERIOD,
 ]
+
+TODAY = date(2026, 8, 17)
 
 
 def test_every_fixed_reply_appears_in_the_prompt_verbatim() -> None:
@@ -76,8 +86,19 @@ def test_the_prompt_states_the_device_rules_the_model_has_to_apply(rule: str) ->
     assert rule in SYSTEM_PROMPT
 
 
-def test_build_input_returns_a_first_turn_unchanged() -> None:
-    assert build_input([], "الحرارة كام؟") == "الحرارة كام؟"
+def test_build_input_prepends_the_today_block_and_the_bare_message() -> None:
+    assert build_input([], "الحرارة كام؟", TODAY) == (
+        "# Today\n"
+        "Today is 2026-08-17 (Monday). Yesterday was 2026-08-16.\n\n"
+        "الحرارة كام؟"
+    )
+
+
+def test_build_input_renders_the_today_block_with_the_right_date() -> None:
+    rendered = build_input([], "كام؟", TODAY)
+
+    assert "# Today" in rendered
+    assert "Today is 2026-08-17 (Monday). Yesterday was 2026-08-16." in rendered
 
 
 def test_build_input_labels_each_speaker_and_separates_the_current_turn() -> None:
@@ -86,9 +107,11 @@ def test_build_input_labels_each_speaker_and_separates_the_current_turn() -> Non
         {"role": "assistant", "content": ASK_WHICH_DEVICE},
     ]
 
-    rendered = build_input(history, "جهاز 2")
+    rendered = build_input(history, "جهاز 2", TODAY)
 
     assert rendered == (
+        "# Today\n"
+        "Today is 2026-08-17 (Monday). Yesterday was 2026-08-16.\n\n"
         f"{HISTORY_HEADER}\n"
         f"Operator: عايز درجة حرارة الماية\n"
         f"Assistant: {ASK_WHICH_DEVICE}\n\n"
