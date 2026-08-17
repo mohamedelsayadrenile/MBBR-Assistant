@@ -70,8 +70,8 @@ def test_each_request_gets_its_own_tool_instances() -> None:
     assert TOOLS[0]._context.jwt == "runtime-jwt"
 
 
-def test_a_fresh_context_has_not_seen_a_missing_device() -> None:
-    assert build_context().device_not_found is False
+def test_a_fresh_context_has_no_device_list_yet() -> None:
+    assert build_context().devices is None
 
 
 def test_resolve_device_id_accepts_a_real_id() -> None:

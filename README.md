@@ -30,7 +30,6 @@ src/
 │   ├── agent.py        # one CrewAI agent, built per request
 │   ├── llm.py          # crewai.LLM from settings, LLMError, <think> stripping
 │   ├── tools.py        # the two tools, per-request context, id validation
-│   ├── device_match.py # reading a spoken device name onto a real device
 │   └── prompts.py      # Egyptian Arabic system prompt + turn rendering
 ├── services/
 │   ├── asr/            # interface + factory + providers/cohere.py
@@ -210,48 +209,28 @@ A conversation is about one device until the operator names another. They say it
 once — «مستوى المياه في جهاز 2 كام؟» — and every follow-up («والضغط كام؟») is about
 جهاز 2 without being asked again.
 
-That device is read back out of the transcript rather than stored, for the same
-reason the device list is: Redis holds the words and nothing else, and a stored id
-would go stale against a list that can change. `_carried_device` walks the history
-backwards for the most recent user message that names a device, so the operator
-switches device simply by saying another one. The one case where their own words do
-not name it — answering a confirmation question with «أيوه» — is read off the
-question that preceded it.
-
-Finding a name *inside a sentence* is a different question from deciding *which
-device a name is*, and `find_device_mention` scores it differently: a sentence is
-mostly words that are not a device name, so the words around the name are not held
-against it the way `match_device` rightly holds them against
-«جهاز أحمد». It stays silent when a sentence names two devices, or names none.
-
-The device reaches the model as its own section of the turn, beside the operator's
-message rather than folded into it — their words are also what the scope rules are
-judged on, and «إيه أخبار الجو؟» has to stay a question about the weather. If the
-model asks «أنهي جهاز؟» anyway, that reply is certainly wrong (the operator answered
-it already), so the turn is put once more with the device named inside the question
-itself, which is the path the model does follow.
-
-The cost is one `get_devices` call per turn that has history, since the carried
-device has to be checked against the live list before it is used.
+That is the model's to work out, from the labelled transcript it is handed each
+turn. `build_input` renders the history as `Operator:` / `Assistant:` lines under
+`# Conversation so far`, and the prompt tells the model to read the last device
+named there before it considers asking «أنهي جهاز؟». Nothing about the device is
+stored: Redis holds the words, a stored id would go stale against a list that can
+change, and the labels are what survive CrewAI flattening the message roles.
 
 ### Reading the name the operator actually said
 
 The operator is speaking, and a transcriber writes it down, so the name that
-arrives is rarely the name the API holds.
-[device_match.py](src/agent/device_match.py) reads it anyway: Arabic-Indic digits
-(«جهاز ١»), a missing space («جهاز١»), Arabic in latin letters («gehaz 1»,
-«jihaz 1»), number words and ordinals («الجهاز التاني»), the definite article, the
-filler words around the name («رقم»، «من فضلك»), and ordinary typos — matched
-against a consonant skeleton, so the two alphabets meet in the middle.
+arrives is rarely the name the API holds: Arabic-Indic digits («جهاز ١»), a missing
+space («جهاز١»), Arabic in latin letters («gehaz 1», «jihaz 1»), number words and
+ordinals («الجهاز التاني»), the definite article, the filler words around the name
+(«رقم»، «من فضلك»), and ordinary typos.
 
-Tolerance stops where guessing starts. The score is per word and weighted by how
-much each word tells the devices apart, because almost every device here is
-called «جهاز ...» — a whole-string distance is dominated by the part that
-distinguishes nothing, which is how «جهاز الطرد المركزي» comes to look like a typo
-for «جهاز 1». A word the operator said that no device has counts against the match
-just as a word of the name they left out does.
+Reading through all of that is the model's job, and the prompt is where it is
+specified — the "Identifying the device" section lists each of the spellings above
+and walks the model through the check against the `get_devices` list. There is no
+matcher in Python, deliberately: one implementation of the rule is easier to keep
+right than two that must agree.
 
-That produces three outcomes rather than two:
+Three outcomes rather than two:
 
 | | reply |
 | --- | --- |
@@ -261,32 +240,25 @@ That produces three outcomes rather than two:
 
 The confirmation names one device, spelled as `get_devices` spells it. Agreement
 («أيوه»، «نعم»، «صح») reads that device; a bare refusal goes back to «أنهي جهاز؟»;
-naming a different device instead («لا، Tank B») is acted on as the new name. The
-same device is never offered twice in a row, which is what stops the loop.
+naming a different device instead («لا، Tank B») is acted on as the new name. All
+three are prompt rules, read off the transcript.
 
 ### When the device does not exist
 
-If the operator answers «أنهي جهاز؟» — or a confirmation question — with a device
-the plant does not have, the reply is «الجهاز ده مش موجود.», and that is decided in
-code, before the model is called at all. `MBBRAgent._read_device_answer` matches
-the operator's own words against the live device list, and hands the model the
-device's real name once it has settled on one.
+`resolve_device_id` is the gate. The model must pass an id copied out of the
+`get_devices` result; a real name or a bare position is accepted too, and anything
+else — an invented id, «جهاز أحمد» — makes the tool return `Device not found.`,
+which the prompt turns into «الجهاز ده مش موجود.». The device list has the final
+word on what exists, not the model.
 
-This cannot be left to the prompt. Measured over the live model, the rule alone
-held in 5 of 16 attempts; the rest of the time the assistant quietly picked a
-device that does exist and reported its readings. The check runs only on the turn
-straight after a device question, where the whole message is the operator's
-answer, and it defers if the device list cannot be fetched, so an outage is never
-reported as a bad device name.
-
-Matching the model's `device_id` is a separate guard: `resolve_device_id` is
-strict on purpose — that argument is machine-written and the prompt requires an id
-copied out of the `get_devices` result, so there is nothing there to be tolerant
-of. An argument that is not an id is re-read as operator wording, and an unclear
-one becomes the confirmation question rather than a device's readings. Neither
-guard can catch a *mis-mapped* device on its own, because a model that decides
-«جهاز النفخ» means «جهاز 1» passes a perfectly valid id — which is why the
-operator's words are checked separately.
+What that gate cannot catch is a *mis-mapped* device: a model that decides
+«جهاز النفخ» means «جهاز 1» passes a perfectly valid id. An earlier version checked
+the operator's own words in Python for exactly this reason, and the measurement
+that motivated it stands: with the prompt rule alone, the live model held in 5 of
+16 attempts, and otherwise quietly picked a device that does exist and reported its
+readings. The Python check was removed in favour of one prompt-driven path, so this
+is the known risk of the current design — worth re-measuring against the model in
+use, and worth sharpening the prompt over rather than reinstating a second matcher.
 
 ### Measurement support
 

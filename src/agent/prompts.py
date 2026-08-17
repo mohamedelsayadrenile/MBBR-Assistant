@@ -18,12 +18,6 @@ AGENT_GOAL = (
 
 HISTORY_HEADER = "# Conversation so far"
 CURRENT_HEADER = "# Current operator message"
-ACTIVE_DEVICE_HEADER = "# The device they are talking about"
-ACTIVE_DEVICE_NOTE = (
-    "The operator named this device earlier in this conversation and has not "
-    "named another since. The message below is about it. Use it, and do not ask "
-    "them which device they mean."
-)
 _SPEAKER_LABELS = {"user": "Operator", "assistant": "Assistant"}
 
 # Exact replies. These are contractual: the operator hears them verbatim.
@@ -32,31 +26,6 @@ DEVICE_NOT_FOUND = "الجهاز ده مش موجود."
 NO_READINGS = "مفيش قراءات متاحة للجهاز ده دلوقتي."
 OUT_OF_SCOPE = "معلش، أنا مساعد متخصص في محطة المعالجة والأجهزة والقراءات بس."
 TOOL_FAILURE_REPLY = "معلش، مش قادر أجيب البيانات دلوقتي. جرّب تاني بعد شوية."
-
-# The one reply that carries a value. The device name goes in exactly as
-# get_devices spells it -- the names already start with "جهاز", so the template
-# must not add the word itself.
-CONFIRM_DEVICE_TEMPLATE = "هل تقصد {device}؟"
-_CONFIRM_PREFIX, _CONFIRM_SUFFIX = CONFIRM_DEVICE_TEMPLATE.split("{device}")
-
-
-def confirm_device_question(device_name: str) -> str:
-    """The sentence that asks the operator to confirm one device."""
-    return CONFIRM_DEVICE_TEMPLATE.format(device=device_name.strip())
-
-
-def confirmed_device_name(reply: str) -> str | None:
-    """The device a previous reply asked about, or None if it asked nothing.
-
-    Reading it back out of the transcript is what lets the next turn act on
-    "أيوه": Redis holds the words of the conversation and nothing else, so the
-    question itself is the only record of which device was offered.
-    """
-    text = reply.strip()
-    if not text.startswith(_CONFIRM_PREFIX) or not text.endswith(_CONFIRM_SUFFIX):
-        return None
-    name = text[len(_CONFIRM_PREFIX) : len(text) - len(_CONFIRM_SUFFIX)].strip()
-    return name or None
 
 SYSTEM_PROMPT = f"""
 # Role
@@ -186,10 +155,11 @@ A conversation is about one device until the operator names another. Once they
 have named one, every follow-up question is about that same device, and asking
 them again is a mistake: they have already told you.
 
-When the turn carries a section headed "{ACTIVE_DEVICE_HEADER}", that is the
-device they named earlier, spelled as get_devices spells it. Read the
-measurement off that device and answer. Do not ask {ASK_WHICH_DEVICE}, do not
-ask them to confirm it, and do not tell them you remembered it.
+Before you ask which device, read "{HISTORY_HEADER}" and find the last device
+named anywhere in it. That is the device this message is about: read the
+measurement off it and answer. Do not ask {ASK_WHICH_DEVICE}, do not ask them to
+confirm it, and do not tell them you remembered it. A device the operator named,
+and a device you offered that they then agreed to, both count as named.
 
 Worked example. Earlier they asked مستوى المياه في جهاز 2, and now they say
 والضغط كام؟. They named no device this time, so it is still جهاز 2: answer with
@@ -199,9 +169,9 @@ You still call get_devices and then get_current_readings for that device, exactl
 as below. What carries over is which device, never the readings — those are read
 again every single time.
 
-The section is absent until they have named a device, and it disappears the
-moment they name a different one. So if it is not there, no device is
-established: ask {ASK_WHICH_DEVICE}.
+The moment they name a different device, that new one replaces it for the rest of
+the conversation. And if no device has been named anywhere in the conversation so
+far, none is established: ask {ASK_WHICH_DEVICE}.
 
 # Identifying the device: run this check every time
 
@@ -249,10 +219,6 @@ Worked examples, with the list holding جهاز 1 and جهاز 2:
 - The operator says جهاز الطرد المركزي. The only word it shares with the list is
   جهاز, which fits both entries and so selects neither, and الطرد المركزي
   resembles nothing there. The device is not found.
-
-If get_current_readings answers with text that begins "Device unclear.", it is
-telling you the same thing: say the confirmation sentence it hands you, exactly
-as given, and stop there.
 
 # When they answer your confirmation question
 
@@ -315,34 +281,24 @@ data. Never invent anything.
 """.strip()
 
 
-def build_input(
-    history: list[MemoryMessage], user_message: str, active_device: str | None = None
-) -> str:
+def build_input(history: list[MemoryMessage], user_message: str) -> str:
     """Render the turn as one string, labelling who said what.
 
     CrewAI joins the contents of a message list with newlines and drops every
     role, so a real multi-turn array would reach the model as an unattributed
     blob -- the assistant's own "أنهي جهاز؟" would read as something the operator
     said, and the device-selection rules depend on telling those apart. Labelling
-    the speakers in the text is what survives that flattening.
-
-    `active_device` is the device the operator settled on earlier and has not
-    replaced. It is stated separately rather than folded into their words,
-    because their words are also what the scope rules are judged on: a question
-    about the weather stays a question about the weather.
+    the speakers in the text is what survives that flattening, and the labelled
+    transcript is also where the model reads which device the conversation is
+    already about.
     """
-    sections = []
     transcript = "\n".join(
         f"{_SPEAKER_LABELS[message['role']]}: {message['content']}"
         for message in history
         if message["role"] in _SPEAKER_LABELS
     )
-    if transcript:
-        sections.append(f"{HISTORY_HEADER}\n{transcript}")
-    if active_device:
-        sections.append(f"{ACTIVE_DEVICE_HEADER}\n{active_device}\n{ACTIVE_DEVICE_NOTE}")
-    if not sections:
+    if not transcript:
         return user_message
-
-    sections.append(f"{CURRENT_HEADER}\n{user_message}")
-    return "\n\n".join(sections)
+    return (
+        f"{HISTORY_HEADER}\n{transcript}\n\n{CURRENT_HEADER}\n{user_message}"
+    )

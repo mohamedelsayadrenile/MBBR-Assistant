@@ -3,11 +3,10 @@ from typing import Any
 
 import pytest
 
-from agent import agent as agent_module
 from agent import tools as tools_module
 from agent.agent import FALLBACK_RESPONSE, MBBRAgent
 from agent.llm import LLMError
-from agent.prompts import ASK_WHICH_DEVICE, DEVICE_NOT_FOUND, SYSTEM_PROMPT, TOOL_FAILURE_REPLY
+from agent.prompts import ASK_WHICH_DEVICE, DEVICE_NOT_FOUND, SYSTEM_PROMPT
 from agent.tools import DEVICE_NOT_FOUND_RESULT, TOOL_FAILED_RESULT
 from services.mbbr_api import MBBRAPIError
 from services.memory import MemoryMessage
@@ -54,9 +53,6 @@ def services(monkeypatch: pytest.MonkeyPatch) -> RecordedServices:
 
     monkeypatch.setattr(tools_module, "get_devices", fake_get_devices)
     monkeypatch.setattr(tools_module, "get_current_readings", fake_get_current_readings)
-    # The agent looks devices up directly for the "أنهي جهاز؟" follow-up check,
-    # so that import needs replacing too or the check reaches the network.
-    monkeypatch.setattr(agent_module, "get_devices", fake_get_devices)
     return recorded
 
 
@@ -111,7 +107,11 @@ async def test_full_device_selection_flow(services: RecordedServices) -> None:
 async def test_history_reaches_the_model_with_the_speakers_labelled(
     services: RecordedServices,
 ) -> None:
-    """CrewAI drops message roles, so build_input has to name who said what."""
+    """CrewAI drops message roles, so build_input has to name who said what.
+
+    This transcript is also the only record of which device the conversation is
+    already about, so the labels are what the carry-forward rule reads.
+    """
     agent, llm = build_agent(["أنهي جهاز؟"])
     history: list[MemoryMessage] = [
         {"role": "user", "content": "عايز درجة حرارة الماية دلوقتي"},
@@ -127,6 +127,37 @@ async def test_history_reaches_the_model_with_the_speakers_labelled(
     assert "Assistant: أنهي جهاز؟" in prompt
     # The current turn is separated from the transcript, not appended to it.
     assert prompt.rstrip().endswith("جهاز 2")
+
+
+async def test_a_follow_up_reaches_the_model_with_the_device_named_earlier(
+    services: RecordedServices,
+) -> None:
+    """The device is carried by the model, so the earlier turn has to be in the input."""
+    history: list[MemoryMessage] = [
+        {"role": "user", "content": "مستوى المياه في جهاز 2 كام؟"},
+        {"role": "assistant", "content": "مستوى المياه في جهاز 2 دلوقتي 1.4 متر."},
+    ]
+    agent, llm = build_agent(
+        [
+            [tool_call("call-1", "get_devices")],
+            [tool_call("call-2", "get_current_readings", device_id=DEVICE_2)],
+            "الضغط دلوقتي 2.1 بار.",
+        ]
+    )
+
+    reply = await agent.run(
+        conversation_id="c1",
+        jwt="runtime-jwt",
+        history=history,
+        user_message="والضغط كام؟",
+    )
+
+    assert reply == "الضغط دلوقتي 2.1 بار."
+    assert services.device_ids == [DEVICE_2]
+    prompt = llm.calls[0][-1]["content"]
+    assert "Operator: مستوى المياه في جهاز 2 كام؟" in prompt
+    # The operator's own words are left exactly as they said them.
+    assert prompt.rstrip().endswith("والضغط كام؟")
 
 
 async def test_system_prompt_reaches_the_model_verbatim(
@@ -232,37 +263,18 @@ ASKED_WHICH: list[MemoryMessage] = [
 ]
 
 
-async def test_an_unknown_device_name_is_reported_as_not_found(
-    services: RecordedServices,
-) -> None:
-    """The operator answers "أنهي جهاز؟" with a device the plant does not have."""
-    # The model is given a script that would answer about some real device. The
-    # reply is decided before it ever runs, so none of it is used.
-    agent, llm = build_agent(
-        [
-            [tool_call("call-1", "get_devices")],
-            [tool_call("call-2", "get_current_readings", device_id=DEVICE_1)],
-            "درجة حرارة الماية 24.7 درجة.",
-        ]
-    )
-
-    reply = await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=ASKED_WHICH,
-        user_message="جهاز أحمد",
-    )
-
-    assert reply == DEVICE_NOT_FOUND
-    assert services.device_ids == []
-    assert llm.calls == []
-
-
-@pytest.mark.parametrize("answer", ["جهاز أحمد", "جهاز النفخ", "المضخة الكبيرة", "جهاز 9"])
-async def test_unknown_device_answers_never_reach_the_readings_api(
+@pytest.mark.parametrize("answer", ["جهاز أحمد", "جهاز النفخ", "المضخة الكبيرة"])
+async def test_an_unknown_device_name_never_reaches_the_readings_api(
     services: RecordedServices, answer: str
 ) -> None:
-    agent, _ = build_agent(["درجة حرارة الماية 24.7 درجة."])
+    """The tool is the source of truth, whatever the model passes it."""
+    agent, llm = build_agent(
+        [
+            [tool_call("call-1", "get_devices")],
+            [tool_call("call-2", "get_current_readings", device_id=answer)],
+            DEVICE_NOT_FOUND,
+        ]
+    )
 
     reply = await agent.run(
         conversation_id="c1", jwt="runtime-jwt", history=ASKED_WHICH, user_message=answer
@@ -270,432 +282,8 @@ async def test_unknown_device_answers_never_reach_the_readings_api(
 
     assert reply == DEVICE_NOT_FOUND
     assert services.device_ids == []
-
-
-@pytest.mark.parametrize(
-    ("answer", "expected"),
-    [
-        ("جهاز 2", DEVICE_2),
-        ("جهاز واحد", DEVICE_1),
-        ("واحد", DEVICE_1),
-        ("جهاز 2 من فضلك", DEVICE_2),
-        # The same two devices, said the ways an operator actually says them.
-        ("جهاز٢", DEVICE_2),
-        ("gehaz 1", DEVICE_1),
-        ("الجهاز التاني", DEVICE_2),
-        ("الجهاز رقم واحد", DEVICE_1),
-    ],
-)
-async def test_a_real_device_answer_is_handed_to_the_model(
-    services: RecordedServices, answer: str, expected: str
-) -> None:
-    agent, _ = build_agent(
-        [
-            [tool_call("call-1", "get_devices")],
-            [tool_call("call-2", "get_current_readings", device_id=expected)],
-            "درجة حرارة الماية 24.7 درجة.",
-        ]
-    )
-
-    reply = await agent.run(
-        conversation_id="c1", jwt="runtime-jwt", history=ASKED_WHICH, user_message=answer
-    )
-
-    assert reply == "درجة حرارة الماية 24.7 درجة."
-    assert services.device_ids == [expected]
-
-
-async def test_a_misspelled_name_is_handed_to_the_model_as_the_real_one(
-    services: RecordedServices,
-) -> None:
-    """The model sees the name the API spells, so both routes reach one id."""
-    agent, llm = build_agent(
-        [
-            [tool_call("call-1", "get_devices")],
-            [tool_call("call-2", "get_current_readings", device_id=DEVICE_1)],
-            "درجة حرارة الماية 24.7 درجة.",
-        ]
-    )
-
-    await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=ASKED_WHICH,
-        user_message="gehaz 1",
-    )
-
-    assert llm.calls[0][-1]["content"].rstrip().endswith("جهاز 1")
-
-
-CONFIRMED_TANK = "هل تقصد MBBR Tank A؟"
-TANKS = [
-    {"id": "t1", "name": "MBBR Tank A"},
-    {"id": "t2", "name": "MBBR Tank B"},
-]
-
-
-@pytest.fixture
-def tank_services(monkeypatch: pytest.MonkeyPatch, services: RecordedServices):
-    """A plant whose device names differ only in their last word."""
-
-    async def fake_get_devices(jwt: str, settings: Any) -> list[dict[str, Any]]:
-        services.devices_calls += 1
-        return TANKS
-
-    monkeypatch.setattr(tools_module, "get_devices", fake_get_devices)
-    monkeypatch.setattr(agent_module, "get_devices", fake_get_devices)
-    return services
-
-
-async def test_a_name_that_fits_two_devices_is_put_back_to_the_operator(
-    tank_services: RecordedServices,
-) -> None:
-    agent, llm = build_agent(["درجة حرارة الماية 24.7 درجة."])
-
-    reply = await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=ASKED_WHICH,
-        user_message="MBBR Tank",
-    )
-
-    assert reply == CONFIRMED_TANK
-    assert tank_services.device_ids == []
-    assert llm.calls == []
-
-
-ASKED_TO_CONFIRM: list[MemoryMessage] = [
-    {"role": "user", "content": "عايز درجة حرارة الماية دلوقتي"},
-    {"role": "assistant", "content": ASK_WHICH_DEVICE},
-    {"role": "user", "content": "MBBR Tank"},
-    {"role": "assistant", "content": CONFIRMED_TANK},
-]
-
-
-@pytest.mark.parametrize("answer", ["أيوة", "ايوه", "اه", "نعم", "صح", "تمام", "yes"])
-async def test_agreeing_reads_the_device_that_was_offered(
-    tank_services: RecordedServices, answer: str
-) -> None:
-    agent, llm = build_agent(
-        [
-            [tool_call("call-1", "get_devices")],
-            [tool_call("call-2", "get_current_readings", device_id="t1")],
-            "درجة حرارة الماية 24.7 درجة.",
-        ]
-    )
-
-    reply = await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=ASKED_TO_CONFIRM,
-        user_message=answer,
-    )
-
-    assert reply == "درجة حرارة الماية 24.7 درجة."
-    assert tank_services.device_ids == ["t1"]
-    # The model is told which device was agreed to, not the word "أيوة".
-    assert llm.calls[0][-1]["content"].rstrip().endswith("MBBR Tank A")
-
-
-@pytest.mark.parametrize("answer", ["لأ", "لا", "no"])
-async def test_refusing_goes_back_to_asking_which_device(
-    tank_services: RecordedServices, answer: str
-) -> None:
-    agent, llm = build_agent(["درجة حرارة الماية 24.7 درجة."])
-
-    reply = await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=ASKED_TO_CONFIRM,
-        user_message=answer,
-    )
-
-    assert reply == ASK_WHICH_DEVICE
-    assert tank_services.device_ids == []
-    assert llm.calls == []
-
-
-async def test_naming_another_device_instead_of_answering_is_acted_on(
-    tank_services: RecordedServices,
-) -> None:
-    agent, _ = build_agent(
-        [
-            [tool_call("call-1", "get_devices")],
-            [tool_call("call-2", "get_current_readings", device_id="t2")],
-            "درجة حرارة الماية 24.7 درجة.",
-        ]
-    )
-
-    reply = await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=ASKED_TO_CONFIRM,
-        user_message="لا، Tank B",
-    )
-
-    assert reply == "درجة حرارة الماية 24.7 درجة."
-    assert tank_services.device_ids == ["t2"]
-
-
-async def test_the_same_device_is_never_offered_twice(
-    tank_services: RecordedServices,
-) -> None:
-    """Repeating the question the operator did not answer would loop."""
-    agent, _ = build_agent(["درجة حرارة الماية 24.7 درجة."])
-
-    reply = await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=ASKED_TO_CONFIRM,
-        user_message="MBBR Tank",
-    )
-
-    assert reply == ASK_WHICH_DEVICE
-
-
-async def test_agreeing_to_a_device_the_model_invented_is_still_not_found(
-    tank_services: RecordedServices,
-) -> None:
-    """A confirmation the model wrote itself does not make the device real."""
-    invented: list[MemoryMessage] = [
-        {"role": "user", "content": "الحرارة كام؟"},
-        {"role": "assistant", "content": "هل تقصد جهاز الطرد المركزي؟"},
-    ]
-    agent, _ = build_agent(["درجة حرارة الماية 24.7 درجة."])
-
-    reply = await agent.run(
-        conversation_id="c1", jwt="runtime-jwt", history=invented, user_message="أيوة"
-    )
-
-    assert reply == DEVICE_NOT_FOUND
-    assert tank_services.device_ids == []
-
-
-async def test_a_device_the_model_is_unsure_of_is_confirmed_not_guessed(
-    tank_services: RecordedServices,
-) -> None:
-    """The model reaches the tool with the operator's words, not an id."""
-    agent, _ = build_agent(
-        [
-            [tool_call("call-1", "get_devices")],
-            [tool_call("call-2", "get_current_readings", device_id="MBBR Tank")],
-            "درجة حرارة الماية 24.7 درجة.",
-        ]
-    )
-
-    reply = await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=[],
-        user_message="الحرارة في MBBR Tank كام؟",
-    )
-
-    assert reply == CONFIRMED_TANK
-    assert tank_services.device_ids == []
-
-
-async def test_the_check_only_applies_right_after_the_device_question(
-    services: RecordedServices,
-) -> None:
-    """An ordinary question is not an answer to "أنهي جهاز؟" and must not trip it."""
-    history: list[MemoryMessage] = [
-        {"role": "user", "content": "إيه الأجهزة اللي عندي؟"},
-        {"role": "assistant", "content": "عندك جهازين في المحطة."},
-    ]
-    agent, _ = build_agent(["أنهي جهاز؟"])
-
-    reply = await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=history,
-        user_message="والضغط كام؟",
-    )
-
-    assert reply == "أنهي جهاز؟"
-
-
-ANSWERED_ABOUT_DEVICE_2: list[MemoryMessage] = [
-    {"role": "user", "content": "مستوى المياه في جهاز 2 كام؟"},
-    {"role": "assistant", "content": "مستوى المياه في جهاز 2 دلوقتي 1.4 متر."},
-]
-
-
-async def test_a_follow_up_stays_on_the_device_already_named(
-    services: RecordedServices,
-) -> None:
-    """They said جهاز 2 last turn, so "والضغط كام؟" is about جهاز 2."""
-    agent, llm = build_agent(
-        [
-            [tool_call("call-1", "get_devices")],
-            [tool_call("call-2", "get_current_readings", device_id=DEVICE_2)],
-            "الضغط دلوقتي 2.1 بار.",
-        ]
-    )
-
-    reply = await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=ANSWERED_ABOUT_DEVICE_2,
-        user_message="والضغط كام؟",
-    )
-
-    assert reply == "الضغط دلوقتي 2.1 بار."
-    assert services.device_ids == [DEVICE_2]
-    # The model is told which device, and told not to ask again.
-    prompt = llm.calls[0][-1]["content"]
-    assert "# The device they are talking about\nجهاز 2" in prompt
-    # ...and the operator's own words are left as they said them.
-    assert prompt.rstrip().endswith("والضغط كام؟")
-
-
-async def test_the_operator_changes_device_by_naming_another(
-    services: RecordedServices,
-) -> None:
-    agent, llm = build_agent(
-        [
-            [tool_call("call-1", "get_devices")],
-            [tool_call("call-2", "get_current_readings", device_id=DEVICE_1)],
-            "الضغط دلوقتي 2.1 بار.",
-        ]
-    )
-
-    await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=ANSWERED_ABOUT_DEVICE_2,
-        user_message="والضغط في جهاز 1؟",
-    )
-
-    assert "# The device they are talking about" not in llm.calls[0][-1]["content"]
-
-
-async def test_no_device_is_carried_before_one_has_been_named(
-    services: RecordedServices,
-) -> None:
-    history: list[MemoryMessage] = [
-        {"role": "user", "content": "إنت بتعمل إيه؟"},
-        {"role": "assistant", "content": "بساعدك في أجهزة المحطة والقراءات."},
-    ]
-    agent, llm = build_agent(["أنهي جهاز؟"])
-
-    reply = await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=history,
-        user_message="الحرارة كام؟",
-    )
-
-    assert reply == ASK_WHICH_DEVICE
-    assert "# The device they are talking about" not in llm.calls[0][-1]["content"]
-
-
-async def test_asking_which_device_again_is_replaced_by_the_answer(
-    services: RecordedServices,
-) -> None:
-    """The model ignored the carried device. It is asked again, and does not ask."""
-    agent, llm = build_agent(
-        [
-            ASK_WHICH_DEVICE,
-            [tool_call("call-1", "get_devices")],
-            [tool_call("call-2", "get_current_readings", device_id=DEVICE_2)],
-            "الضغط دلوقتي 2.1 بار.",
-        ]
-    )
-
-    reply = await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=ANSWERED_ABOUT_DEVICE_2,
-        user_message="والضغط كام؟",
-    )
-
-    assert reply == "الضغط دلوقتي 2.1 بار."
-    assert services.device_ids == [DEVICE_2]
-    # The second attempt says the device inside the question itself.
-    assert "جهاز 2: والضغط كام؟" in llm.calls[1][-1]["content"]
-
-
-async def test_the_device_agreed_to_is_the_one_carried_forward(
-    services: RecordedServices,
-) -> None:
-    """The operator said "أيوه", so their own words never name the device."""
-    history: list[MemoryMessage] = [
-        {"role": "user", "content": "الحرارة كام؟"},
-        {"role": "assistant", "content": ASK_WHICH_DEVICE},
-        {"role": "user", "content": "جهاز٢"},
-        {"role": "assistant", "content": "هل تقصد جهاز 2؟"},
-        {"role": "user", "content": "أيوة"},
-        {"role": "assistant", "content": "درجة حرارة الماية 24.7 درجة."},
-    ]
-    agent, llm = build_agent(
-        [
-            [tool_call("call-1", "get_devices")],
-            [tool_call("call-2", "get_current_readings", device_id=DEVICE_2)],
-            "الضغط دلوقتي 2.1 بار.",
-        ]
-    )
-
-    await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=history,
-        user_message="والضغط كام؟",
-    )
-
-    assert "# The device they are talking about\nجهاز 2" in llm.calls[0][-1]["content"]
-
-
-async def test_a_carried_device_is_not_invented_when_the_list_is_unavailable(
-    monkeypatch: pytest.MonkeyPatch, services: RecordedServices
-) -> None:
-    async def failing_devices(jwt: str, settings: Any) -> list[dict[str, Any]]:
-        raise MBBRAPIError("upstream is down")
-
-    monkeypatch.setattr(agent_module, "get_devices", failing_devices)
-    monkeypatch.setattr(tools_module, "get_devices", failing_devices)
-    agent, llm = build_agent(
-        [
-            [tool_call("call-1", "get_devices")],
-            TOOL_FAILURE_REPLY,
-        ]
-    )
-
-    reply = await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=ANSWERED_ABOUT_DEVICE_2,
-        user_message="والضغط كام؟",
-    )
-
-    assert reply == TOOL_FAILURE_REPLY
-    assert "# The device they are talking about" not in llm.calls[0][-1]["content"]
-
-
-async def test_the_check_defers_when_the_device_list_is_unavailable(
-    monkeypatch: pytest.MonkeyPatch, services: RecordedServices
-) -> None:
-    """An outage must not be reported to the operator as a bad device name."""
-
-    async def failing_devices(jwt: str, settings: Any) -> list[dict[str, Any]]:
-        raise MBBRAPIError("upstream is down")
-
-    monkeypatch.setattr(agent_module, "get_devices", failing_devices)
-    monkeypatch.setattr(tools_module, "get_devices", failing_devices)
-    agent, _ = build_agent(
-        [
-            [tool_call("call-1", "get_devices")],
-            "معلش، مش قادر أجيب البيانات دلوقتي. جرّب تاني بعد شوية.",
-        ]
-    )
-
-    reply = await agent.run(
-        conversation_id="c1",
-        jwt="runtime-jwt",
-        history=ASKED_WHICH,
-        user_message="جهاز أحمد",
-    )
-
-    assert reply == "معلش، مش قادر أجيب البيانات دلوقتي. جرّب تاني بعد شوية."
+    # The model is told the device does not exist, and says so in Arabic.
+    assert llm.calls[-1][-1]["content"] == DEVICE_NOT_FOUND_RESULT
 
 
 async def test_an_invented_device_id_never_reaches_the_readings_api(
@@ -711,7 +299,7 @@ async def test_an_invented_device_id_never_reaches_the_readings_api(
                     device_id="00000000-dead-4000-8000-000000000000",
                 )
             ],
-            "أنهي جهاز؟",
+            DEVICE_NOT_FOUND,
         ]
     )
 
@@ -722,6 +310,26 @@ async def test_an_invented_device_id_never_reaches_the_readings_api(
     assert services.device_ids == []
     assert reply == DEVICE_NOT_FOUND
     assert llm.calls[-1][-1]["content"] == DEVICE_NOT_FOUND_RESULT
+
+
+async def test_a_device_name_the_plant_has_is_resolved_to_its_id(
+    services: RecordedServices,
+) -> None:
+    """The model should pass an id, but a real name is not worth refusing over."""
+    agent, _ = build_agent(
+        [
+            [tool_call("call-1", "get_devices")],
+            [tool_call("call-2", "get_current_readings", device_id="جهاز 2")],
+            "درجة حرارة الماية 24.7 درجة.",
+        ]
+    )
+
+    reply = await agent.run(
+        conversation_id="c1", jwt="runtime-jwt", history=ASKED_WHICH, user_message="جهاز 2"
+    )
+
+    assert reply == "درجة حرارة الماية 24.7 درجة."
+    assert services.device_ids == [DEVICE_2]
 
 
 async def test_devices_are_fetched_even_when_the_model_skips_the_lookup(
@@ -742,10 +350,10 @@ async def test_devices_are_fetched_even_when_the_model_skips_the_lookup(
     assert services.device_ids == [DEVICE_2]
 
 
-async def test_recovering_onto_a_real_device_clears_the_not_found_reply(
+async def test_recovering_onto_a_real_device_answers_normally(
     services: RecordedServices,
 ) -> None:
-    """A bad id followed by a good one must answer normally, not "not found"."""
+    """A bad id followed by a good one must answer, not stay on "not found"."""
     agent, _ = build_agent(
         [
             [tool_call("call-1", "get_devices")],

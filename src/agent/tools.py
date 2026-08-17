@@ -13,13 +13,12 @@ in place while running, so a shared instance would not be safe anyway.
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr
 
-from agent.device_match import DeviceMatch, match_device
-from agent.prompts import confirm_device_question
 from core.config import Settings
 from core.logging import json_preview
 from services.devices import get_devices
@@ -33,7 +32,6 @@ GET_CURRENT_READINGS = "get_current_readings"
 
 TOOL_FAILED_RESULT = "Tool failed temporarily."
 DEVICE_NOT_FOUND_RESULT = "Device not found."
-DEVICE_UNCLEAR_RESULT = "Device unclear. Reply with exactly: {question}"
 
 
 def resolve_device_id(raw_device_id: str, devices: list[dict[str, Any]]) -> str | None:
@@ -43,10 +41,10 @@ def resolve_device_id(raw_device_id: str, devices: list[dict[str, Any]]) -> str 
     name the operator said, or a bare position ("2" for "جهاز 2"). Anything else
     is a hallucination and must not reach the API.
 
-    Strict on purpose. This reads a machine-written argument, and the prompt
-    requires it to be an id copied out of the get_devices result, so there is
-    nothing here to be tolerant of. Tolerance belongs on the operator's own
-    words, which is what `match_spoken_device` reads.
+    Strict on purpose. This is the plant's list having the final word on which
+    devices exist: the prompt requires an id copied out of the get_devices
+    result, and reading the operator's own wording is the model's job, not this
+    function's.
     """
     candidate = raw_device_id.strip()
     if not candidate:
@@ -65,36 +63,14 @@ def resolve_device_id(raw_device_id: str, devices: list[dict[str, Any]]) -> str 
     return None
 
 
-def match_spoken_device(spoken: str, devices: list[dict[str, Any]]) -> DeviceMatch | None:
-    """Resolve what the operator said onto one device, or None.
-
-    This reads the operator's own words rather than the id the model produced,
-    which is the only way to catch a name the plant does not have: a model that
-    decides "جهاز النفخ" means "جهاز 1" passes a perfectly valid id, and no
-    amount of id validation downstream can tell that it was the wrong device.
-
-    Far more forgiving than `resolve_device_id`, because this is speech: the
-    spelling, the alphabet and the filler words are all the operator's to choose.
-    See `agent.device_match` for what that tolerance is and where it stops.
-    """
-    return match_device(spoken, devices)
-
-
+@dataclass
 class ToolContext:
-    """Per-request state the two tools share.
+    """Per-request state the two tools share: the credentials and this turn's
+    device list, fetched once so get_current_readings need not fetch it again."""
 
-    Holds the credentials, the device list fetched during this turn, whether the
-    turn ended on a device the plant does not have, and the device the operator
-    still has to confirm. `MBBRAgent` reads those last two to answer
-    deterministically instead of trusting the model to.
-    """
-
-    def __init__(self, jwt: str, settings: Settings) -> None:
-        self.jwt = jwt
-        self.settings = settings
-        self.devices: list[dict[str, Any]] | None = None
-        self.device_not_found = False
-        self.device_to_confirm: str | None = None
+    jwt: str
+    settings: Settings
+    devices: list[dict[str, Any]] | None = None
 
 
 class _ContextBoundTool(BaseTool):
@@ -180,35 +156,20 @@ class GetCurrentReadingsTool(_ContextBoundTool):
     def _run(self, device_id: str) -> str:
         logger.info("tool_call_started tool_name=%s", self.name)
 
+        # The prompt tells the model to call get_devices first. If it skipped
+        # that, fetch the list here rather than trusting the argument.
         devices = self._context.devices
         if devices is None:
-            # The prompt tells the model to call get_devices first. If it skipped
-            # that, fetch the list here rather than trusting the argument.
             devices = self._fetch_devices()
             if devices is None:
                 return TOOL_FAILED_RESULT
 
         real_device_id = resolve_device_id(device_id, devices)
         if real_device_id is None:
-            # Not an id, so it is the operator's own wording arriving here
-            # unresolved. Read it the tolerant way before refusing.
-            match = match_device(device_id, devices)
-            if match is None:
-                # Whatever the operator named is not in the plant's list.
-                # Refusing here is what makes "this device does not exist" a fact
-                # rather than something the model has to remember to say.
-                logger.warning("device_not_found devices=%s", len(devices))
-                self._context.device_not_found = True
-                return DEVICE_NOT_FOUND_RESULT
-            if not match.confident:
-                # Close to an entry, but not clearly it. Asking costs one short
-                # question; reading out the wrong device's numbers does not.
-                logger.info("device_confirmation_needed devices=%s", len(devices))
-                self._context.device_to_confirm = match.name
-                return DEVICE_UNCLEAR_RESULT.format(
-                    question=confirm_device_question(match.name)
-                )
-            real_device_id = match.id
+            # Refusing here is what makes "this device does not exist" a fact
+            # rather than something the model has to remember to say.
+            logger.warning("device_not_found devices=%s", len(devices))
+            return DEVICE_NOT_FOUND_RESULT
 
         readings = self._call(
             get_current_readings(self._context.jwt, real_device_id, self._context.settings)
@@ -216,9 +177,6 @@ class GetCurrentReadingsTool(_ContextBoundTool):
         if readings is None:
             return TOOL_FAILED_RESULT
 
-        # The turn recovered onto a device that does exist.
-        self._context.device_not_found = False
-        self._context.device_to_confirm = None
         logger.info(
             "tool_call_completed tool_name=%s result=%s", self.name, json_preview(readings)
         )
