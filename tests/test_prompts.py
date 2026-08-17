@@ -1,4 +1,8 @@
+import pytest
+
 from agent.prompts import (
+    ACTIVE_DEVICE_HEADER,
+    ACTIVE_DEVICE_NOTE,
     ASK_WHICH_DEVICE,
     CURRENT_HEADER,
     DEVICE_NOT_FOUND,
@@ -8,6 +12,8 @@ from agent.prompts import (
     SYSTEM_PROMPT,
     TOOL_FAILURE_REPLY,
     build_input,
+    confirm_device_question,
+    confirmed_device_name,
 )
 from services.memory import MemoryMessage
 
@@ -50,6 +56,53 @@ def test_an_unmatched_device_has_its_own_reply() -> None:
     # Missing device and unknown device are different situations with different
     # answers; conflating them is what the prompt rule exists to prevent.
     assert DEVICE_NOT_FOUND != ASK_WHICH_DEVICE
+
+
+def test_the_confirmation_question_names_one_device_and_asks_nothing_else() -> None:
+    assert confirm_device_question("جهاز 1") == "هل تقصد جهاز 1؟"
+
+
+def test_the_confirmation_question_does_not_repeat_the_word_the_name_has() -> None:
+    """The names already start with جهاز; "هل تقصد جهاز جهاز 1؟" is read aloud."""
+    assert confirm_device_question("جهاز 1").count("جهاز") == 1
+
+
+def test_the_confirmation_question_is_shown_to_the_model_in_full() -> None:
+    # With a placeholder it would be paraphrased; the model copies what it sees.
+    assert confirm_device_question("جهاز 1") in SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize("name", ["جهاز 1", "MBBR Tank A", "جهاز الطرد المركزي"])
+def test_the_device_offered_is_read_back_out_of_the_question(name: str) -> None:
+    """Redis holds only the words, so the question is the record of the offer."""
+    assert confirmed_device_name(confirm_device_question(name)) == name
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [ASK_WHICH_DEVICE, DEVICE_NOT_FOUND, NO_READINGS, "هل تقصد ؟", "درجة الحرارة 24.7."],
+)
+def test_a_reply_that_offered_no_device_reads_back_as_nothing(reply: str) -> None:
+    assert confirmed_device_name(reply) is None
+
+
+def test_build_input_states_the_active_device_beside_the_message_not_inside_it() -> None:
+    """Their words are what the scope rules are judged on, so they stay theirs."""
+    history: list[MemoryMessage] = [
+        {"role": "user", "content": "مستوى المياه في جهاز 2 كام؟"},
+        {"role": "assistant", "content": "مستوى المياه 1.4 متر."},
+    ]
+
+    rendered = build_input(history, "والضغط كام؟", active_device="جهاز 2")
+
+    assert f"{ACTIVE_DEVICE_HEADER}\nجهاز 2\n{ACTIVE_DEVICE_NOTE}" in rendered
+    assert rendered.rstrip().endswith(f"{CURRENT_HEADER}\nوالضغط كام؟")
+
+
+def test_build_input_leaves_the_section_out_when_no_device_is_active() -> None:
+    history: list[MemoryMessage] = [{"role": "user", "content": "الحرارة كام؟"}]
+
+    assert ACTIVE_DEVICE_HEADER not in build_input(history, "أنهي جهاز؟")
 
 
 def test_build_input_returns_a_first_turn_unchanged() -> None:

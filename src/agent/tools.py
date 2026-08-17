@@ -18,6 +18,8 @@ from typing import Any
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr
 
+from agent.device_match import DeviceMatch, match_device
+from agent.prompts import confirm_device_question
 from core.config import Settings
 from core.logging import json_preview
 from services.devices import get_devices
@@ -31,6 +33,7 @@ GET_CURRENT_READINGS = "get_current_readings"
 
 TOOL_FAILED_RESULT = "Tool failed temporarily."
 DEVICE_NOT_FOUND_RESULT = "Device not found."
+DEVICE_UNCLEAR_RESULT = "Device unclear. Reply with exactly: {question}"
 
 
 def resolve_device_id(raw_device_id: str, devices: list[dict[str, Any]]) -> str | None:
@@ -39,6 +42,11 @@ def resolve_device_id(raw_device_id: str, devices: list[dict[str, Any]]) -> str 
     The model reliably produces one of three things: the id itself, the device
     name the operator said, or a bare position ("2" for "جهاز 2"). Anything else
     is a hallucination and must not reach the API.
+
+    Strict on purpose. This reads a machine-written argument, and the prompt
+    requires it to be an id copied out of the get_devices result, so there is
+    nothing here to be tolerant of. Tolerance belongs on the operator's own
+    words, which is what `match_spoken_device` reads.
     """
     candidate = raw_device_id.strip()
     if not candidate:
@@ -57,65 +65,28 @@ def resolve_device_id(raw_device_id: str, devices: list[dict[str, Any]]) -> str 
     return None
 
 
-# Spoken digits, as an operator answering "أنهي جهاز؟" would say them.
-_ARABIC_NUMBER_WORDS = {
-    "واحد": "1",
-    "اتنين": "2",
-    "إتنين": "2",
-    "اثنين": "2",
-    "تلاتة": "3",
-    "ثلاثة": "3",
-    "اربعة": "4",
-    "أربعة": "4",
-    "خمسة": "5",
-    "ستة": "6",
-    "سبعة": "7",
-    "تمانية": "8",
-    "ثمانية": "8",
-    "تسعة": "9",
-    "عشرة": "10",
-}
-
-
-def match_spoken_device(spoken: str, devices: list[dict[str, Any]]) -> str | None:
-    """Resolve what the operator said onto a real device id, or None.
+def match_spoken_device(spoken: str, devices: list[dict[str, Any]]) -> DeviceMatch | None:
+    """Resolve what the operator said onto one device, or None.
 
     This reads the operator's own words rather than the id the model produced,
     which is the only way to catch a name the plant does not have: a model that
     decides "جهاز النفخ" means "جهاز 1" passes a perfectly valid id, and no
     amount of id validation downstream can tell that it was the wrong device.
 
-    Deliberately more forgiving than `resolve_device_id`, because this is speech:
-    "جهاز 2 من فضلك" and "واحد" both have to land.
+    Far more forgiving than `resolve_device_id`, because this is speech: the
+    spelling, the alphabet and the filler words are all the operator's to choose.
+    See `agent.device_match` for what that tolerance is and where it stops.
     """
-    words = [_ARABIC_NUMBER_WORDS.get(word, word) for word in spoken.split()]
-    normalised = " ".join(words).strip()
-    if not normalised:
-        return None
-
-    exact = resolve_device_id(normalised, devices)
-    if exact is not None:
-        return exact
-
-    folded = normalised.casefold()
-    for device in devices:
-        name = device["name"].strip().casefold()
-        if name and name in folded:
-            return device["id"]
-
-    # A bare position said inside a longer sentence ("الجهاز رقم 2").
-    for word in words:
-        if word.isdigit() and 1 <= int(word) <= len(devices):
-            return devices[int(word) - 1]["id"]
-    return None
+    return match_device(spoken, devices)
 
 
 class ToolContext:
     """Per-request state the two tools share.
 
-    Holds the credentials, the device list fetched during this turn, and whether
-    the turn ended on a device the plant does not have. `MBBRAgent` reads that
-    last flag to answer deterministically instead of trusting the model to.
+    Holds the credentials, the device list fetched during this turn, whether the
+    turn ended on a device the plant does not have, and the device the operator
+    still has to confirm. `MBBRAgent` reads those last two to answer
+    deterministically instead of trusting the model to.
     """
 
     def __init__(self, jwt: str, settings: Settings) -> None:
@@ -123,6 +94,7 @@ class ToolContext:
         self.settings = settings
         self.devices: list[dict[str, Any]] | None = None
         self.device_not_found = False
+        self.device_to_confirm: str | None = None
 
 
 class _ContextBoundTool(BaseTool):
@@ -218,12 +190,25 @@ class GetCurrentReadingsTool(_ContextBoundTool):
 
         real_device_id = resolve_device_id(device_id, devices)
         if real_device_id is None:
-            # Whatever the operator named is not in the plant's list. Refusing
-            # here is what makes "this device does not exist" a fact rather than
-            # something the model has to remember to say.
-            logger.warning("device_not_found devices=%s", len(devices))
-            self._context.device_not_found = True
-            return DEVICE_NOT_FOUND_RESULT
+            # Not an id, so it is the operator's own wording arriving here
+            # unresolved. Read it the tolerant way before refusing.
+            match = match_device(device_id, devices)
+            if match is None:
+                # Whatever the operator named is not in the plant's list.
+                # Refusing here is what makes "this device does not exist" a fact
+                # rather than something the model has to remember to say.
+                logger.warning("device_not_found devices=%s", len(devices))
+                self._context.device_not_found = True
+                return DEVICE_NOT_FOUND_RESULT
+            if not match.confident:
+                # Close to an entry, but not clearly it. Asking costs one short
+                # question; reading out the wrong device's numbers does not.
+                logger.info("device_confirmation_needed devices=%s", len(devices))
+                self._context.device_to_confirm = match.name
+                return DEVICE_UNCLEAR_RESULT.format(
+                    question=confirm_device_question(match.name)
+                )
+            real_device_id = match.id
 
         readings = self._call(
             get_current_readings(self._context.jwt, real_device_id, self._context.settings)
@@ -233,6 +218,7 @@ class GetCurrentReadingsTool(_ContextBoundTool):
 
         # The turn recovered onto a device that does exist.
         self._context.device_not_found = False
+        self._context.device_to_confirm = None
         logger.info(
             "tool_call_completed tool_name=%s result=%s", self.name, json_preview(readings)
         )
