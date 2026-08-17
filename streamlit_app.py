@@ -24,6 +24,15 @@ def new_conversation_id() -> str:
     return f"ui-{uuid.uuid4().hex[:8]}"
 
 
+def fetch_voices(api_base_url: str) -> list[str]:
+    """Ask the API which voices it accepts. Empty means 'could not tell'."""
+    try:
+        response = httpx.get(f"{api_base_url}/api/v1/voices", timeout=5)
+        return response.json()["voices"] if response.status_code == 200 else []
+    except (httpx.HTTPError, KeyError, ValueError):
+        return []
+
+
 if "conversation_id" not in st.session_state:
     st.session_state.conversation_id = new_conversation_id()
 if "turns" not in st.session_state:
@@ -38,6 +47,18 @@ with st.sidebar:
         type="password",
         help="Forwarded to the MBBR APIs. Never sent to the LLM or stored in Redis.",
     )
+
+    if "voices" not in st.session_state:
+        st.session_state.voices = fetch_voices(api_base_url)
+    if st.session_state.voices:
+        voice = st.selectbox(
+            "Voice", ["(default)", *st.session_state.voices], help="Who reads the reply."
+        )
+        voice = None if voice == "(default)" else voice
+    else:
+        # The API is down or too old to list them; let the tester still say a name.
+        voice = st.text_input("Voice", help="Leave empty for the default voice.").strip()
+        voice = voice or None
 
     st.caption(f"Conversation: `{st.session_state.conversation_id}`")
     if st.button("New conversation", use_container_width=True):
@@ -79,6 +100,9 @@ def send_turn(*, audio_payload: bytes | None = None, text: str | None = None) ->
     files = None
     if text is None:
         files = {"audio": ("voice.wav", audio_payload, "audio/wav")}
+        # Only a voice turn is spoken, so the voice is only worth sending there.
+        if voice is not None:
+            data["voice"] = voice
     else:
         data["text"] = text
 

@@ -33,15 +33,17 @@ src/
 │   └── prompts.py      # Egyptian Arabic system prompt + turn rendering
 ├── services/
 │   ├── asr/            # interface + factory + providers/cohere.py
-│   ├── tts/            # interface + factory + providers/voicetut.py
+│   ├── tts/            # interface + factory + providers/voicetut.py + voices.py
 │   ├── mbbr_api.py     # shared GET + Bearer auth + envelope unwrapping
 │   ├── devices.py      # get_devices(jwt, settings)
 │   ├── readings.py     # get_current_readings(jwt, device_id, settings)
 │   ├── memory.py       # RedisMemory
 │   └── chat_service.py # one turn: memory → agent → memory → speech
-├── api/v1/endpoints/chat.py
+├── api/v1/endpoints/{chat.py,voices.py}
 ├── core/{config.py,logging.py}
 └── main.py
+
+assets/voices/          # elsayad.wav + elsayad.txt, the cloned voice
 ```
 
 `interface + factory + providers/` is used only for the external-provider
@@ -64,7 +66,7 @@ new setting to `.env`, `.env.example`, and `Settings` in the same change.
 ## Running locally
 
 ```bash
-docker compose -f docker/compose.yml up -d redis
+docker run -d --name mbbr-redis -p 6379:6379 redis:7-alpine
 uv run uvicorn main:app --reload
 curl localhost:8000/health          # {"status":"ok"}
 ```
@@ -83,7 +85,8 @@ uv run uvicorn main:app --reload          # terminal 1
 uv run streamlit run streamlit_app.py     # terminal 2
 ```
 
-Put a JWT in the sidebar, then either record a question with the mic (or upload a
+Put a JWT in the sidebar, pick a **Voice** if you want one other than the default,
+then either record a question with the mic (or upload a
 WAV) and press **Send**, or type one into the chat box at the bottom. A spoken
 question is shown as text and played back as audio; a typed one comes back as text
 only. **New conversation** starts a fresh `conversation_id` so you can test the
@@ -104,6 +107,7 @@ sidebar.
 | `jwt` | text | forwarded to the MBBR APIs as `Authorization: Bearer <jwt>` |
 | `audio` | file | WAV — send this **or** `text`, not both |
 | `text` | text | the message as typed — send this **or** `audio`, not both |
+| `voice` | text | optional; who reads the reply. Case-insensitive, blank means the default, ignored on a `text` turn. `GET /api/v1/voices` lists the valid names |
 
 Voice in, voice out; text in, text out. An `audio` turn is transcribed and the
 reply comes back spoken; a `text` turn skips the ASR and the TTS, so the response
@@ -114,6 +118,9 @@ curl -F conversation_id=c1 -F jwt="$JWT" -F audio=@sample.wav \
      http://localhost:8000/api/v1/chat
 
 curl -F conversation_id=c1 -F jwt="$JWT" -F text="عايز درجة حرارة الماية دلوقتي" \
+     http://localhost:8000/api/v1/chat
+
+curl -F conversation_id=c1 -F jwt="$JWT" -F audio=@sample.wav -F voice=Elsayad \
      http://localhost:8000/api/v1/chat
 ```
 
@@ -133,16 +140,44 @@ synthesis fails; the text reply still comes back.
 
 | Status | Cause |
 |---|---|
-| 422 | blank `conversation_id`/`jwt`, neither or both of `audio`/`text`, non-WAV or empty audio, nothing recognised in the audio |
+| 422 | blank `conversation_id`/`jwt`, neither or both of `audio`/`text`, non-WAV or empty audio, nothing recognised in the audio, unknown `voice` |
 | 413 | audio over `ASR_MAX_AUDIO_BYTES` |
 | 503 | transcription failed |
 
 A `200` does not always mean everything worked: if the LLM, Redis, or the MBBR API
 is down, the reply is an Arabic apology, spoken as usual.
 
+### `GET /api/v1/voices`
+
+```json
+{ "voices": ["Abdelrahman", "…", "Elsayad"], "default": "Asmaa" }
+```
+
+Everything `POST /api/v1/chat` accepts as `voice`, and which one it falls back to.
+
 ### `GET /health`
 
 Returns `{"status": "ok"}`. Does not check dependencies.
+
+## Voices
+
+Two kinds sit behind one name:
+
+- The **built-in speakers** ship inside the VoiceTut model repo. The list is read
+  off the loaded model rather than hardcoded, so a checkpoint that adds a speaker
+  needs no code change.
+- **`Elsayad`** is cloned zero-shot from `assets/voices/elsayad.wav` and its
+  transcript in `assets/voices/elsayad.txt`. The model is given both, and **the
+  transcript must match the clip word for word** — a wrong one does not error, it
+  quietly degrades every reply in that voice. Both files are required at startup;
+  the app refuses to start without them.
+
+Adding another cloned voice means dropping a clip and a transcript into
+`assets/voices/` and naming the pair in `CUSTOM_VOICES` in
+[src/services/tts/voices.py](src/services/tts/voices.py).
+
+`TTS_DEFAULT_VOICE` picks what an unspecified request gets; it may name a built-in
+or a cloned voice, and startup fails if it names neither.
 
 ## Agent tools
 

@@ -27,6 +27,27 @@ async def transcribe(request: Request, audio: UploadFile) -> str:
     return transcript.strip()
 
 
+def resolve_voice(request: Request, voice: str | None) -> str | None:
+    """Map a requested voice onto its canonical name. None means the default.
+
+    Rejected here rather than at synthesis time: a TTS failure degrades to a
+    text-only reply, so a misspelt voice would otherwise cost a whole agent turn
+    and come back as a silent 200.
+    """
+    if voice is None:
+        return None
+
+    known_voices: tuple[str, ...] = request.app.state.tts_voices
+    folded = voice.casefold()
+    for known in known_voices:
+        if known.casefold() == folded:
+            return known
+
+    raise HTTPException(
+        status_code=422, detail=f"Unknown voice. Available: {', '.join(known_voices)}."
+    )
+
+
 def is_wav(audio: UploadFile) -> bool:
     filename = (audio.filename or "").lower()
     content_type = (audio.content_type or "").lower()

@@ -11,6 +11,7 @@ class ChatRequest(BaseModel):
     jwt: str
     audio: UploadFile | None = None
     text: str | None = None
+    voice: str | None = None
 
     @property
     def speak(self) -> bool:
@@ -40,6 +41,11 @@ class ChatRequest(BaseModel):
             raise HTTPException(
                 status_code=422, detail="Provide either audio or text, not both."
             )
+
+        # Blank means "whichever voice is configured as the default". Which names
+        # are valid is only known once the TTS model is loaded, so the endpoint
+        # checks that against app state rather than this validator.
+        self.voice = (self.voice or "").strip() or None
         return self
 
 

@@ -25,14 +25,21 @@ class ChatService:
         self._tts = tts
 
     async def chat(
-        self, *, conversation_id: str, jwt: str, transcript: str, speak: bool = True
+        self,
+        *,
+        conversation_id: str,
+        jwt: str,
+        transcript: str,
+        speak: bool = True,
+        voice: str | None = None,
     ) -> ChatResponse:
         started_at = perf_counter()
         logger.info(
-            "chat_request_started conversation_id=%s transcript_chars=%s speak=%s",
+            "chat_request_started conversation_id=%s transcript_chars=%s speak=%s voice=%s",
             conversation_id,
             len(transcript),
             speak,
+            voice,
         )
 
         try:
@@ -57,7 +64,7 @@ class ChatService:
             reply=reply,
         )
         if speak:
-            await self._add_voice(response)
+            await self._add_voice(response, voice)
 
         logger.info(
             "chat_request_completed conversation_id=%s reply_chars=%s has_audio=%s latency_ms=%s",
@@ -68,10 +75,10 @@ class ChatService:
         )
         return response
 
-    async def _add_voice(self, response: ChatResponse) -> None:
+    async def _add_voice(self, response: ChatResponse, voice: str | None) -> None:
         """Attach spoken audio. A TTS failure degrades to a text-only reply."""
         try:
-            wav_bytes = await self._tts.synthesize(response.reply)
+            wav_bytes = await self._tts.synthesize(response.reply, voice=voice)
         except TTSError:
             logger.warning(
                 "voice_response_failed conversation_id=%s", response.conversation_id

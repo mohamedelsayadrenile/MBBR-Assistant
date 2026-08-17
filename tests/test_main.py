@@ -29,6 +29,9 @@ class FakeModelProvider:
     async def load_model(self) -> None:
         self.loads += 1
 
+    def voices(self) -> tuple[str, ...]:
+        return ("Asmaa", "Elsayad")
+
 
 @pytest.fixture
 def providers(monkeypatch: pytest.MonkeyPatch) -> dict[str, FakeModelProvider]:
@@ -55,3 +58,14 @@ async def test_both_models_are_loaded_before_the_app_serves(
     async with main_module.lifespan(app):
         assert providers["asr"].loads == 1
         assert providers["tts"].loads == 1
+
+
+async def test_the_voice_list_is_published_for_request_validation(
+    providers: dict[str, FakeModelProvider],
+) -> None:
+    """The endpoint rejects unknown voices against this, so it must be there."""
+    app: Any = FastAPI()
+
+    async with main_module.lifespan(app):
+        assert app.state.tts_voices == ("Asmaa", "Elsayad")
+        assert app.state.tts_default_voice == "Asmaa"

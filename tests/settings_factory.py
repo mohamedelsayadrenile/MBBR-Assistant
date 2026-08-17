@@ -30,7 +30,7 @@ BASE_ENV: dict[str, Any] = {
     "TTS_MODEL": "mohammedaly22/VoiceTut-TTS",
     "TTS_DEVICE": "cpu",
     "TTS_DTYPE": "float32",
-    "TTS_SPEAKER": "Asmaa",
+    "TTS_DEFAULT_VOICE": "Asmaa",
     "TTS_NUM_STEP": 48,
     "TTS_GUIDANCE_SCALE": 2.5,
     "TTS_SPEED": 1.05,

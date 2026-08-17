@@ -45,11 +45,13 @@ class FakeAgent:
 class FakeTTS:
     def __init__(self, wav_bytes: bytes = b"fake-wav", should_fail: bool = False) -> None:
         self.spoken: list[str] = []
+        self.voices: list[str | None] = []
         self._wav_bytes = wav_bytes
         self._should_fail = should_fail
 
-    async def synthesize(self, text: str) -> bytes:
+    async def synthesize(self, text: str, *, voice: str | None = None) -> bytes:
         self.spoken.append(text)
+        self.voices.append(voice)
         if self._should_fail:
             raise TTSError("failed")
         return self._wav_bytes
@@ -157,6 +159,25 @@ async def test_service_never_returns_the_jwt() -> None:
     assert "runtime-jwt" not in response.model_dump_json()
 
 
+async def test_the_requested_voice_reaches_the_tts() -> None:
+    service, _, _, tts = build_service()
+
+    await service.chat(
+        conversation_id="c1", jwt="runtime-jwt", transcript="مرحبا", voice="Elsayad"
+    )
+
+    assert tts.voices == ["Elsayad"]
+
+
+async def test_no_voice_stays_none_for_the_provider_to_default() -> None:
+    """The service picks no voice of its own; the provider owns the default."""
+    service, _, _, tts = build_service()
+
+    await service.chat(conversation_id="c1", jwt="runtime-jwt", transcript="مرحبا")
+
+    assert tts.voices == [None]
+
+
 def test_agent_signature_matches_what_the_service_calls() -> None:
     # FakeAgent stands in for MBBRAgent; keep the keyword contract in step.
     import inspect
@@ -167,4 +188,17 @@ def test_agent_signature_matches_what_the_service_calls() -> None:
         "jwt",
         "history",
         "user_message",
+    }
+
+
+def test_tts_signature_matches_what_the_service_calls() -> None:
+    # Same for FakeTTS: a provider that grew an argument must not go unnoticed.
+    import inspect
+
+    from services.tts.providers.voicetut import VoiceTutTTSProvider
+
+    assert set(inspect.signature(VoiceTutTTSProvider.synthesize).parameters) == {
+        "self",
+        "text",
+        "voice",
     }

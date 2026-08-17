@@ -6,6 +6,7 @@ from redis.asyncio import Redis
 
 from agent.agent import MBBRAgent
 from api.v1.endpoints.chat import router as chat_router
+from api.v1.endpoints.voices import router as voices_router
 from core.config import get_settings
 from core.logging import configure_logging
 from services.asr.factory import create_asr_provider
@@ -38,6 +39,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.redis = redis
     app.state.asr = asr
     app.state.asr_max_audio_bytes = settings.asr_max_audio_bytes
+    # The voice list only exists once the model is loaded, so it is copied out
+    # here; the provider itself stays behind the chat service.
+    app.state.tts_voices = tts.voices()
+    app.state.tts_default_voice = settings.tts_default_voice
     app.state.chat_service = ChatService(
         memory=memory,
         agent=MBBRAgent(settings),
@@ -52,6 +57,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="MBBR Assistant", lifespan=lifespan)
 app.include_router(chat_router)
+app.include_router(voices_router)
 
 
 @app.get("/health")

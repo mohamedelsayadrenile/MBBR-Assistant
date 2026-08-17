@@ -59,7 +59,8 @@ class Settings(BaseSettings):
     tts_model: str = Field(alias="TTS_MODEL")
     tts_device: str = Field(alias="TTS_DEVICE")
     tts_dtype: str = Field(alias="TTS_DTYPE")
-    tts_speaker: str = Field(alias="TTS_SPEAKER")
+    # A built-in speaker or a cloned voice; used when a request names none.
+    tts_default_voice: str = Field(alias="TTS_DEFAULT_VOICE")
     tts_num_step: int = Field(alias="TTS_NUM_STEP", gt=0)
     tts_guidance_scale: float = Field(alias="TTS_GUIDANCE_SCALE", gt=0)
     tts_speed: float = Field(alias="TTS_SPEED", gt=0)

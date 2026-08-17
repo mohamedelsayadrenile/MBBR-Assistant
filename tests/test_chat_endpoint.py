@@ -23,7 +23,13 @@ class FakeChatService:
         self._audio_base64 = audio_base64
 
     async def chat(
-        self, *, conversation_id: str, jwt: str, transcript: str, speak: bool = True
+        self,
+        *,
+        conversation_id: str,
+        jwt: str,
+        transcript: str,
+        speak: bool = True,
+        voice: str | None = None,
     ) -> ChatResponse:
         self.calls.append(
             {
@@ -31,6 +37,7 @@ class FakeChatService:
                 "jwt": jwt,
                 "transcript": transcript,
                 "speak": speak,
+                "voice": voice,
             }
         )
         audio_base64 = self._audio_base64 if speak else None
@@ -41,6 +48,9 @@ class FakeChatService:
             audio_base64=audio_base64,
             audio_content_type="audio/wav" if audio_base64 else None,
         )
+
+
+VOICES = ("Asmaa", "Elsayad")
 
 
 def make_client(
@@ -54,6 +64,8 @@ def make_client(
     app.state.asr = asr or FakeASR()
     app.state.chat_service = service
     app.state.asr_max_audio_bytes = max_audio_bytes
+    # Set in the real lifespan once the TTS model has told us what it can speak.
+    app.state.tts_voices = VOICES
     return TestClient(app), service
 
 
@@ -93,6 +105,7 @@ def test_chat_endpoint_returns_transcript_reply_and_audio() -> None:
             "jwt": "runtime-jwt",
             "transcript": "عايز درجة حرارة الماية دلوقتي",
             "speak": True,
+            "voice": None,
         }
     ]
 
@@ -114,6 +127,7 @@ def test_chat_endpoint_answers_text_with_text_only() -> None:
             "jwt": "runtime-jwt",
             "transcript": "عايز درجة حرارة الماية دلوقتي",
             "speak": False,
+            "voice": None,
         }
     ]
 
@@ -135,6 +149,46 @@ def test_chat_endpoint_treats_blank_text_alongside_audio_as_voice_only() -> None
     assert response.status_code == 200
     assert service.calls[0]["speak"] is True
     assert service.calls[0]["transcript"] == "عايز درجة حرارة الماية دلوقتي"
+
+
+def test_chat_endpoint_forwards_the_requested_voice() -> None:
+    client, service = make_client()
+
+    response = post_audio(client, voice="Elsayad")
+
+    assert response.status_code == 200
+    assert service.calls[0]["voice"] == "Elsayad"
+
+
+def test_chat_endpoint_canonicalises_the_voice_name() -> None:
+    """A voice is typed and spoken by hand, so casing must not decide the answer."""
+    client, service = make_client()
+
+    response = post_audio(client, voice="  elsayad ")
+
+    assert response.status_code == 200
+    assert service.calls[0]["voice"] == "Elsayad"
+
+
+def test_chat_endpoint_treats_a_blank_voice_as_the_default() -> None:
+    client, service = make_client()
+
+    response = post_audio(client, voice="   ")
+
+    assert response.status_code == 200
+    assert service.calls[0]["voice"] is None
+
+
+def test_chat_endpoint_rejects_an_unknown_voice_before_the_agent_runs() -> None:
+    # A TTS failure degrades to a text-only 200, so a bad name has to be caught
+    # here or it costs an agent turn and comes back silent.
+    client, service = make_client()
+
+    response = post_audio(client, voice="Bob")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Unknown voice. Available: Asmaa, Elsayad."
+    assert service.calls == []
 
 
 def test_chat_endpoint_rejects_a_request_with_neither_audio_nor_text() -> None:
