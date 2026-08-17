@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+src/*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv
+
+# Local configuration
+.env
+
+# Contains a live admin JWT in its saved output
+APIs.ipynb
+.ipynb_checkpoints/
