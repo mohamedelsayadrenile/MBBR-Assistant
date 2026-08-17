@@ -16,6 +16,7 @@ name, a device id, or a reading.
 | Layer | Choice |
 |---|---|
 | API | FastAPI |
+| Agent | CrewAI — one agent, native tool calling |
 | ASR | `CohereLabs/cohere-transcribe-arabic-07-2026`, local via `transformers` |
 | LLM | Any OpenAI-compatible endpoint — Qwen API in dev, self-hosted vLLM in prod |
 | TTS | `mohammedaly22/VoiceTut-TTS`, local |
@@ -26,9 +27,10 @@ name, a device id, or a reading.
 ```text
 src/
 ├── agent/
-│   ├── agent.py        # bounded tool-calling loop + device-selection guard
-│   ├── tools.py        # the two tool schemas, JWT injection, id resolution
-│   └── prompts.py      # Egyptian Arabic system prompt
+│   ├── agent.py        # one CrewAI agent, built per request
+│   ├── llm.py          # crewai.LLM from settings + <think> stripping
+│   ├── tools.py        # the two tools, per-request context, device matching
+│   └── prompts.py      # Egyptian Arabic system prompt + turn rendering
 ├── services/
 │   ├── asr/            # interface + factory + providers/cohere.py
 │   ├── tts/            # interface + factory + providers/voicetut.py
@@ -43,8 +45,11 @@ src/
 └── main.py
 ```
 
-`interface + factory + providers/` is used only for the three external-provider
+`interface + factory + providers/` is used only for the external-provider
 services. Everything else is plain modules and functions.
+
+`services/llm/` is left over from before CrewAI: only `LLMError` is still used,
+and the provider and factory are now dead. They are slated for deletion.
 
 ## Setup
 
@@ -146,8 +151,9 @@ Two tools are exposed to the model:
 - `get_devices()` — the plant's real devices, as `{id, name}`.
 - `get_current_readings(device_id)` — the latest readings for one device.
 
-**The JWT is never in a tool schema, a prompt, Redis, or a log line.** It is
-injected as a Python argument at dispatch time.
+**The JWT is never in a tool schema, a prompt, Redis, or a log line.** The tools
+are constructed fresh for each request with the JWT on a private attribute, which
+CrewAI does not read when it derives the tool schema.
 
 ### Device selection
 
@@ -162,11 +168,26 @@ Redis holds only user/assistant text. Rather than a second store, the prompt
 requires `get_devices` before every `get_current_readings`, which puts a fresh list
 in the current turn.
 
-The agent then validates the model's `device_id` against that list — exact id, then
-a bare position, then the device name. If none match, the device list is handed back
-instead of a reading, so the model re-asks rather than inventing a UUID. If the model
-skips the lookup entirely, the agent fetches the list itself before trusting the
-argument.
+### When the device does not exist
+
+If the operator answers «أنهي جهاز؟» with a device the plant does not have, the
+reply is «الجهاز ده مش موجود.» — and that is decided in code, before the model is
+called at all. `MBBRAgent._answered_with_an_unknown_device` matches the
+operator's own words against the live device list, allowing Arabic number words
+and a name said inside a longer sentence.
+
+This cannot be left to the prompt. Measured over the live model, the rule alone
+held in 5 of 16 attempts; the rest of the time the assistant quietly picked a
+device that does exist and reported its readings. The check runs only on the turn
+straight after «أنهي جهاز؟», where the whole message is the operator's answer, and
+it defers if the device list cannot be fetched, so an outage is never reported as
+a bad device name.
+
+Matching the model's `device_id` is a separate, weaker guard: `resolve_device_id`
+rejects an id that is in no device's entry, which stops an invented UUID reaching
+the API. It cannot catch a *mis-mapped* device, because a model that decides
+«جهاز النفخ» means «جهاز 1» passes a perfectly valid id — which is why the
+operator's words are checked separately.
 
 ### Measurement support
 

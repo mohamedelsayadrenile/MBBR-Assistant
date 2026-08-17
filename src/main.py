@@ -10,7 +10,6 @@ from core.config import get_settings
 from core.logging import configure_logging
 from services.asr.factory import create_asr_provider
 from services.chat_service import ChatService
-from services.llm.factory import create_llm_provider
 from services.memory import RedisMemory
 from services.tts.factory import create_tts_provider
 
@@ -28,7 +27,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ttl_seconds=settings.redis_ttl_seconds,
         max_messages=settings.memory_max_messages,
     )
-    llm = create_llm_provider(settings)
     asr = create_asr_provider(settings)
     tts = create_tts_provider(settings)
     # ASR runs on every request, so pay its load cost at startup. TTS loads
@@ -40,7 +38,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.asr_max_audio_bytes = settings.asr_max_audio_bytes
     app.state.chat_service = ChatService(
         memory=memory,
-        agent=MBBRAgent(llm, settings),
+        agent=MBBRAgent(settings),
         tts=tts,
     )
 
