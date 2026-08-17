@@ -70,7 +70,8 @@ curl localhost:8000/health          # {"status":"ok"}
 ```
 
 The app is started as `main:app`, not `src.main:app` — `src/` is the package root.
-ASR loads at startup; TTS loads lazily on the first reply.
+Both the ASR and the TTS model load at startup, one after the other, so the first
+request pays no load cost. Expect `/health` to stay unreachable until they are in.
 
 ## Manual tester (Streamlit)
 

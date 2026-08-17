@@ -29,9 +29,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     asr = create_asr_provider(settings)
     tts = create_tts_provider(settings)
-    # ASR runs on every request, so pay its load cost at startup. TTS loads
-    # lazily on first synthesis to keep startup off the critical path.
+    # Both models are paid for at startup, so no operator waits on a load. They
+    # load one after the other rather than together: on a single GPU, two
+    # concurrent loads would stack their peak memory.
     await asr.load_model()
+    await tts.load_model()
 
     app.state.redis = redis
     app.state.asr = asr
