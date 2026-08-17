@@ -5,8 +5,8 @@ from time import perf_counter
 from redis.exceptions import RedisError
 
 from agent.agent import MBBRAgent
+from agent.llm import LLMError
 from models.schemas.chat import ChatResponse
-from services.llm.interface import LLMError
 from services.mbbr_api import MBBRAPIError
 from services.memory import RedisMemory
 from services.tts.interface import TTSError, TTSProvider

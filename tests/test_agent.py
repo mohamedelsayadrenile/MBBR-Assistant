@@ -6,9 +6,9 @@ import pytest
 from agent import agent as agent_module
 from agent import tools as tools_module
 from agent.agent import FALLBACK_RESPONSE, MBBRAgent
+from agent.llm import LLMError
 from agent.prompts import ASK_WHICH_DEVICE, DEVICE_NOT_FOUND, SYSTEM_PROMPT
 from agent.tools import DEVICE_NOT_FOUND_RESULT, TOOL_FAILED_RESULT
-from services.llm.interface import LLMError
 from services.mbbr_api import MBBRAPIError
 from services.memory import MemoryMessage
 from tests.crewai_llm_fake import ScriptedLLM, tool_call

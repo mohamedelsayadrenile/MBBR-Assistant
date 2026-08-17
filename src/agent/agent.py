@@ -4,7 +4,7 @@ import logging
 from crewai import LLM, Agent
 from crewai.events.event_listener import EventListener
 
-from agent.llm import build_llm, strip_thinking
+from agent.llm import LLMError, build_llm, strip_thinking
 from agent.prompts import (
     AGENT_GOAL,
     AGENT_ROLE,
@@ -16,7 +16,6 @@ from agent.prompts import (
 from agent.tools import ToolContext, build_tools, match_spoken_device
 from core.config import Settings
 from services.devices import get_devices
-from services.llm.interface import LLMError
 from services.mbbr_api import MBBRAPIError
 from services.memory import MemoryMessage
 

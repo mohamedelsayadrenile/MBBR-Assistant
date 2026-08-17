@@ -12,6 +12,10 @@ from crewai import LLM
 from core.config import Settings
 
 
+class LLMError(Exception):
+    """Raised when the LLM call fails."""
+
+
 def build_llm(settings: Settings) -> LLM:
     """Build the shared LLM handle. Construct once and reuse across requests."""
     model = settings.llm_model

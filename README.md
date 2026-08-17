@@ -28,13 +28,12 @@ name, a device id, or a reading.
 src/
 ├── agent/
 │   ├── agent.py        # one CrewAI agent, built per request
-│   ├── llm.py          # crewai.LLM from settings + <think> stripping
+│   ├── llm.py          # crewai.LLM from settings, LLMError, <think> stripping
 │   ├── tools.py        # the two tools, per-request context, device matching
 │   └── prompts.py      # Egyptian Arabic system prompt + turn rendering
 ├── services/
 │   ├── asr/            # interface + factory + providers/cohere.py
 │   ├── tts/            # interface + factory + providers/voicetut.py
-│   ├── llm/            # interface + factory + providers/openai_compatible.py
 │   ├── mbbr_api.py     # shared GET + Bearer auth + envelope unwrapping
 │   ├── devices.py      # get_devices(jwt, settings)
 │   ├── readings.py     # get_current_readings(jwt, device_id, settings)
@@ -48,8 +47,8 @@ src/
 `interface + factory + providers/` is used only for the external-provider
 services. Everything else is plain modules and functions.
 
-`services/llm/` is left over from before CrewAI: only `LLMError` is still used,
-and the provider and factory are now dead. They are slated for deletion.
+There is no `services/llm/`: CrewAI owns the model call, so `agent/llm.py` is the
+only LLM code — the `crewai.LLM` handle and `LLMError` for a failed turn.
 
 ## Setup
 

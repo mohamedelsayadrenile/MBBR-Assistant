@@ -34,7 +34,6 @@ class Settings(BaseSettings):
     app_env: str = Field(alias="APP_ENV")
     log_level: str = Field(alias="LOG_LEVEL")
 
-    llm_provider: str = Field(alias="LLM_PROVIDER")
     llm_base_url: str = Field(alias="LLM_BASE_URL")
     # Must be non-empty: the OpenAI client rejects a blank key at construction
     # with an error that does not name the setting. Self-hosted vLLM ignores the

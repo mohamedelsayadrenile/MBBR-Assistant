@@ -32,6 +32,16 @@ def test_fixed_replies_are_not_wrapped_in_quotes_in_the_prompt() -> None:
         assert f'"{reply}"' not in SYSTEM_PROMPT
 
 
+def test_the_refusal_sentence_is_stated_once_and_in_its_own_section() -> None:
+    """Refusing is a last resort, so the prompt may offer it in one place only.
+
+    It used to sit inside the source-of-truth rules as well, which is how a
+    perfectly ordinary readings question ("ضغط المياه عامل ايه؟") came back
+    refused instead of answered.
+    """
+    assert SYSTEM_PROMPT.count(OUT_OF_SCOPE) == 1
+
+
 def test_the_fixed_replies_are_all_distinct() -> None:
     assert len(set(FIXED_REPLIES)) == len(FIXED_REPLIES)
 

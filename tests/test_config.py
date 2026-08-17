@@ -25,7 +25,7 @@ def test_env_example_satisfies_every_required_setting() -> None:
 def test_env_example_leaves_the_vllm_only_knobs_unset() -> None:
     settings = ExampleSettings()
 
-    # Blank in .env means "do not send this field" — see the LLM provider.
+    # Blank in .env means "do not send this field" — see agent/llm.py.
     assert settings.llm_top_k is None
     assert settings.llm_enable_thinking is None
 

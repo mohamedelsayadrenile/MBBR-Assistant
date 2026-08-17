@@ -1,8 +1,8 @@
 from redis.exceptions import RedisError
 
 from agent.agent import MBBRAgent
+from agent.llm import LLMError
 from services.chat_service import TEMPORARY_FAILURE_REPLY, ChatService
-from services.llm.interface import LLMError
 from services.memory import MemoryMessage
 from services.tts.interface import TTSError
 

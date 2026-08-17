@@ -11,7 +11,6 @@ BASE_ENV: dict[str, Any] = {
     "APP_NAME": "MBBR Assistant",
     "APP_ENV": "test",
     "LOG_LEVEL": "INFO",
-    "LLM_PROVIDER": "openai_compatible",
     "LLM_BASE_URL": "http://llm.test/v1",
     "LLM_API_KEY": "test-key",
     "LLM_MODEL": "test-model",
