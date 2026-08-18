@@ -153,6 +153,29 @@ class MBBRAgent:
             raise TypeError("LLM did not return a structured interpretation")
 
         update: dict[str, Any] = {"request": interpretation}
+        # If the user requested a measurement but didn't name a device,
+        # proactively fetch the station's devices and ask a short, focused
+        # clarification question. This ensures we never assume a device.
+        if (
+            interpretation["intent"] in {"current", "historical"}
+            and interpretation.get("measurement")
+            and not interpretation.get("device")
+        ):
+            try:
+                devices = await get_devices(runtime.context.jwt, self._settings)
+            except MBBRAPIError:
+                logger.exception(
+                    "agent_devices_failed conversation_id=%s",
+                    runtime.context.conversation_id,
+                )
+                update["result"] = {"error": "api_failure"}
+            else:
+                # Ask the user to disambiguate the device. Keep the question
+                # short and natural in Egyptian Arabic as required.
+                update["request"] = {"intent": "reply", "reply": "تقصد أي جهاز؟"}
+                # keep available_devices in the update for any downstream
+                # debugging or resolution steps in this run (not persisted).
+                update["available_devices"] = devices
         if (
             interpretation["intent"] in {"current", "historical"}
             and interpretation.get("device")
