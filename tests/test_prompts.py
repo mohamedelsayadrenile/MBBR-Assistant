@@ -12,14 +12,13 @@ def test_system_prompt_accepts_the_runtime_date() -> None:
 @pytest.mark.parametrize(
     "rule",
     [
-        '"devices"',
         '"current"',
         '"historical"',
         '"reply"',
         "conversation history",
         "Arabic-Indic",
-        "exact id and name",
-        "invent an API id",
+        "exact id",
+        "invent an API",
     ],
 )
 def test_system_prompt_contains_its_interpretation_rules(rule: str) -> None:
@@ -29,6 +28,8 @@ def test_system_prompt_contains_its_interpretation_rules(rule: str) -> None:
 @pytest.mark.parametrize(
     "outcome",
     [
+        "ask_measurement",
+        "ask_device",
         "device_not_found",
         "invalid_period",
         "range_too_long",

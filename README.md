@@ -187,12 +187,12 @@ The agent is one compiled, bounded graph:
 interpret → execute → compose → END
 ```
 
-`interpret` uses LangChain structured output to understand the request and carry
-conversation context forward. For a readings request it fetches the current
-device list and asks the same model to resolve the operator's wording to an id
-from that list. `execute` applies date and id safety checks and directly awaits
-the current/history service. `compose` receives the request and trusted result.
-Direct conversational replies still need only one model call.
+`interpret` uses LangChain structured output to identify the requested sensor and
+carry conversation context forward. If the operator named a device, it fetches
+the current list and asks the same model to resolve that wording to an id. If no
+device was named, it asks for one without fetching the list. `execute` applies
+date and id safety checks and awaits the current/history service. `compose`
+answers only the requested sensor from the trusted result.
 
 There are no model tools, agent loops, retries, worker threads, sync wrappers,
 checkpoints, or custom reducers. Redis remains the only cross-turn memory.

@@ -28,7 +28,6 @@ class AgentState(TypedDict, total=False):
     history: list[MemoryMessage]
     user_message: str
     request: dict[str, Any]
-    devices: list[dict[str, Any]]
     result: Any
     reply: str
 
@@ -70,7 +69,7 @@ class MBBRAgent:
                 "properties": {
                     "intent": {
                         "type": "string",
-                        "enum": ["reply", "devices", "current", "historical"],
+                        "enum": ["reply", "current", "historical"],
                     },
                     "device": {
                         "type": "string",
@@ -154,7 +153,11 @@ class MBBRAgent:
             raise TypeError("LLM did not return a structured interpretation")
 
         update: dict[str, Any] = {"request": interpretation}
-        if interpretation["intent"] != "reply":
+        if (
+            interpretation["intent"] in {"current", "historical"}
+            and interpretation.get("device")
+            and interpretation.get("measurement")
+        ):
             try:
                 devices = await get_devices(runtime.context.jwt, self._settings)
             except MBBRAPIError:
@@ -164,29 +167,29 @@ class MBBRAgent:
                 )
                 update["result"] = {"error": "api_failure"}
             else:
-                update["devices"] = devices
-                if interpretation["intent"] in {"current", "historical"}:
-                    resolution = await self._interpreter.ainvoke(
-                        [
-                            SystemMessage(
-                                SYSTEM_PROMPT.format(
-                                    today=runtime.context.today.isoformat()
-                                )
-                            ),
-                            HumanMessage(
-                                json.dumps(
-                                    {
-                                        "interpretation": interpretation,
-                                        "available_devices": devices,
-                                    },
-                                    ensure_ascii=False,
-                                )
-                            ),
-                        ]
-                    )
-                    if not isinstance(resolution, dict) or "intent" not in resolution:
-                        raise TypeError("LLM did not return a device resolution")
-                    update["request"] = resolution
+                resolution = await self._interpreter.ainvoke(
+                    [
+                        SystemMessage(
+                            SYSTEM_PROMPT.format(today=runtime.context.today.isoformat())
+                        ),
+                        HumanMessage(
+                            json.dumps(
+                                {
+                                    "interpretation": interpretation,
+                                    "available_devices": devices,
+                                },
+                                ensure_ascii=False,
+                            )
+                        ),
+                    ]
+                )
+                if not isinstance(resolution, dict) or "intent" not in resolution:
+                    raise TypeError("LLM did not return a device resolution")
+                update["request"] = resolution
+                if resolution["intent"] != "reply" and not any(
+                    device["id"] == resolution.get("device_id") for device in devices
+                ):
+                    update["result"] = {"error": "device_not_found"}
         logger.info(
             "agent_turn_interpreted conversation_id=%s intent=%s",
             runtime.context.conversation_id,
@@ -202,19 +205,10 @@ class MBBRAgent:
         request = state["request"]
         if request["intent"] == "reply":
             return {"result": request.get("reply")}
-        if request["intent"] == "devices":
-            return {"result": [device["name"] for device in state["devices"]]}
-
-        device = next(
-            (
-                device
-                for device in state["devices"]
-                if device["id"] == request.get("device_id")
-            ),
-            None,
-        )
-        if device is None:
-            return {"result": {"error": "device_not_found"}}
+        if not request.get("measurement"):
+            return {"result": {"error": "ask_measurement"}}
+        if not request.get("device_id"):
+            return {"result": {"error": "ask_device"}}
 
         if request["intent"] == "historical":
             if not request.get("from_date") or not request.get("to_date"):
@@ -230,14 +224,18 @@ class MBBRAgent:
         try:
             if request["intent"] == "current":
                 payload = await get_current_readings(
-                    runtime.context.jwt, device["id"], self._settings
+                    runtime.context.jwt, request["device_id"], self._settings
                 )
                 if payload.get("count") == 0 or payload.get("readings") == []:
                     return {"result": {"error": "no_readings"}}
             else:
                 start, end = date_range
                 payload = await get_historical_readings(
-                    runtime.context.jwt, device["id"], start, end, self._settings
+                    runtime.context.jwt,
+                    request["device_id"],
+                    start,
+                    end,
+                    self._settings,
                 )
         except MBBRAPIError:
             logger.exception(
@@ -246,7 +244,9 @@ class MBBRAgent:
             )
             return {"result": {"error": "api_failure"}}
 
-        return {"result": {"device_name": device["name"], "data": payload}}
+        return {
+            "result": {"device_name": request.get("device_name"), "data": payload}
+        }
 
     async def _compose(
         self, state: AgentState, runtime: Runtime[RunContext]

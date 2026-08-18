@@ -189,6 +189,34 @@ async def test_missing_device_skips_all_apis_and_is_composed(
     assert services.devices_calls == 0
 
 
+async def test_device_follow_up_recovers_the_pending_sensor(
+    services: RecordedServices,
+) -> None:
+    history: list[MemoryMessage] = [
+        {"role": "user", "content": "عايز مستوى الماية"},
+        {"role": "assistant", "content": "في أنهي جهاز؟"},
+    ]
+    agent, _ = build_agent(
+        [
+            interpretation(
+                intent="current", device="جهاز 2", measurement="مستوى الماية"
+            ),
+            interpretation(
+                intent="current",
+                device_id=DEVICE_2,
+                device_name="جهاز 2",
+                measurement="مستوى الماية",
+            ),
+            "مستوى الماية 1.4 متر.",
+        ]
+    )
+
+    reply = await run(agent, history)
+
+    assert reply == "مستوى الماية 1.4 متر."
+    assert services.current_ids == [DEVICE_2]
+
+
 async def test_unknown_device_never_reaches_readings_api(
     services: RecordedServices,
 ) -> None:
@@ -299,7 +327,7 @@ async def test_api_failure_becomes_a_composable_outcome(
     monkeypatch.setattr(agent_module, "get_devices", failing_devices)
     agent, model = build_agent(
         [
-            interpretation(intent="devices"),
+            interpretation(intent="current", device="جهاز 1", measurement="الضغط"),
             "مش قادر أجيب بيانات الأجهزة دلوقتي، جرّب كمان شوية.",
         ]
     )
@@ -319,7 +347,18 @@ async def test_api_failure_becomes_a_composable_outcome(
 async def test_composed_reply_is_cleaned(
     services: RecordedServices, content: str, expected: str
 ) -> None:
-    agent, _ = build_agent([interpretation(intent="devices"), content])
+    agent, _ = build_agent(
+        [
+            interpretation(intent="current", device="جهاز 1", measurement="الضغط"),
+            interpretation(
+                intent="current",
+                device_id=DEVICE_1,
+                device_name="جهاز 1",
+                measurement="الضغط",
+            ),
+            content,
+        ]
+    )
 
     assert await run(agent) == expected
 
@@ -333,7 +372,16 @@ async def test_model_failure_surfaces_as_llm_error() -> None:
 
 async def test_jwt_never_enters_model_messages(services: RecordedServices) -> None:
     agent, model = build_agent(
-        [interpretation(intent="devices"), "في المحطة جهازين."]
+        [
+            interpretation(intent="current", device="جهاز 1", measurement="الضغط"),
+            interpretation(
+                intent="current",
+                device_id=DEVICE_1,
+                device_name="جهاز 1",
+                measurement="الضغط",
+            ),
+            "الضغط 2.1 بار.",
+        ]
     )
 
     await run(agent)
