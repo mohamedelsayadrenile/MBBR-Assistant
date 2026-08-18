@@ -16,7 +16,7 @@ name, a device id, or a reading.
 | Layer | Choice |
 |---|---|
 | API | FastAPI |
-| Agent | LangGraph — bounded interpret → validate → fetch → compose workflow |
+| Agent | LangGraph — bounded interpret → execute → compose workflow |
 | ASR | `CohereLabs/cohere-transcribe-arabic-07-2026`, local via `transformers` |
 | LLM | Any OpenAI-compatible endpoint — Qwen API in dev, self-hosted vLLM in prod |
 | TTS | `mohammedaly22/VoiceTut-TTS`, local |
@@ -27,7 +27,7 @@ name, a device id, or a reading.
 ```text
 src/
 ├── agent/
-│   ├── agent.py        # four-node graph, state, routing, and validation
+│   ├── agent.py        # three-node graph, execution, and safety checks
 │   ├── llm.py          # ChatOpenAI from settings, LLMError, <think> stripping
 │   └── prompts.py      # shared interpretation and response system prompt
 ├── services/
@@ -184,15 +184,15 @@ or a cloned voice, and startup fails if it names neither.
 The agent is one compiled, bounded graph:
 
 ```text
-interpret → validate → fetch → compose → END
+interpret → execute → compose → END
 ```
 
-`interpret` uses LangChain structured output to classify the request, carry
-conversation context forward, understand the device wording, and turn past
-periods into ISO dates. `validate` is plain Python. `fetch` directly awaits the
-existing devices/current/history services. `compose` receives only the validated
-request and trusted API result. Direct conversational replies finish after
-`interpret`, so a turn makes at most two model calls.
+`interpret` uses LangChain structured output to understand the request and carry
+conversation context forward. For a readings request it fetches the current
+device list and asks the same model to resolve the operator's wording to an id
+from that list. `execute` applies date and id safety checks and directly awaits
+the current/history service. `compose` receives the request and trusted result.
+Direct conversational replies still need only one model call.
 
 There are no model tools, agent loops, retries, worker threads, sync wrappers,
 checkpoints, or custom reducers. Redis remains the only cross-turn memory.
@@ -208,8 +208,7 @@ clarification instead of guessing from the requested measurement.
 
 The operator's answer ("جهاز 2") arrives on a later turn and Redis holds only
 user/assistant text. The interpretation model recovers the pending request from
-that history, then the fetch node obtains a fresh device list before any readings
-request.
+that history, then resolves it against a fresh device list before execution.
 
 ### The device the conversation is about
 
@@ -229,16 +228,13 @@ space («جهاز١»), Arabic in latin letters («gehaz 1», «jihaz 1»), numb
 ordinals («الجهاز التاني»), the definite article, the filler words around the name
 («رقم»، «من فضلك»), and ordinary typos.
 
-Reading through those variants is the main interpretation model's job. It returns
-a device name or one-based position; there is no second matching model or fuzzy
-Python implementation.
+Reading through those variants and selecting from the live list is the
+interpretation model's job. There is no Python fuzzy matcher.
 
 ### When the device does not exist
 
-`resolve_device_id` is the safety gate. It accepts only an id, exact name, or valid
-position found in the freshly fetched list. Anything else is routed as not found,
-and no readings API receives an unverified id. The device list has the final word
-on what exists, not the model.
+Before execution, Python only verifies that the id selected by the model exists
+in the freshly fetched list. No readings API receives an unverified id.
 
 ### Measurement support
 

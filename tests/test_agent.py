@@ -6,7 +6,7 @@ import pytest
 from langchain_core.messages import AIMessage, BaseMessage
 
 import agent.agent as agent_module
-from agent.agent import FALLBACK_RESPONSE, MBBRAgent, TurnInterpretation
+from agent.agent import FALLBACK_RESPONSE, MBBRAgent
 from agent.llm import LLMError
 from services.mbbr_api import MBBRAPIError
 from services.memory import MemoryMessage
@@ -28,12 +28,12 @@ class StructuredModel:
     def __init__(self, parent: "ScriptedModel") -> None:
         self.parent = parent
 
-    async def ainvoke(self, messages: list[BaseMessage]) -> TurnInterpretation:
+    async def ainvoke(self, messages: list[BaseMessage]) -> dict[str, Any]:
         self.parent.calls.append(("interpret", messages))
         result = self.parent.pop()
         if isinstance(result, Exception):
             raise result
-        assert isinstance(result, TurnInterpretation)
+        assert isinstance(result, dict)
         return result
 
 
@@ -97,6 +97,10 @@ def build_agent(responses: list[Any]) -> tuple[MBBRAgent, ScriptedModel]:
     return MBBRAgent(build_settings(), llm=model), model  # type: ignore[arg-type]
 
 
+def interpretation(**fields: Any) -> dict[str, Any]:
+    return fields
+
+
 async def run(agent: MBBRAgent, history: list[MemoryMessage] | None = None) -> str:
     return await agent.run(
         conversation_id="conversation-1",
@@ -108,7 +112,7 @@ async def run(agent: MBBRAgent, history: list[MemoryMessage] | None = None) -> s
 
 async def test_direct_reply_ends_after_interpretation(services: RecordedServices) -> None:
     agent, model = build_agent(
-        [TurnInterpretation(intent="reply", reply="أهلاً، أقدر أساعدك في قراءات المحطة.")]
+        [interpretation(intent="reply", reply="أهلاً، أقدر أساعدك في قراءات المحطة.")]
     )
 
     reply = await run(agent)
@@ -121,8 +125,14 @@ async def test_direct_reply_ends_after_interpretation(services: RecordedServices
 async def test_current_reading_follows_the_linear_graph(services: RecordedServices) -> None:
     agent, model = build_agent(
         [
-            TurnInterpretation(
+            interpretation(
                 intent="current", device="2", measurement="درجة حرارة الماية"
+            ),
+            interpretation(
+                intent="current",
+                device_id=DEVICE_2,
+                device_name="جهاز 2",
+                measurement="درجة حرارة الماية",
             ),
             "درجة حرارة الماية 24.7 درجة مئوية.",
         ]
@@ -133,7 +143,9 @@ async def test_current_reading_follows_the_linear_graph(services: RecordedServic
     assert reply == "درجة حرارة الماية 24.7 درجة مئوية."
     assert services.devices_calls == 1
     assert services.current_ids == [DEVICE_2]
-    assert [kind for kind, _ in model.calls] == ["interpret", "compose"]
+    assert [kind for kind, _ in model.calls] == ["interpret", "interpret", "compose"]
+    resolution_input = json.loads(model.calls[1][1][-1].content)
+    assert resolution_input["available_devices"] == DEVICES
 
 
 async def test_history_is_passed_as_real_chat_roles(services: RecordedServices) -> None:
@@ -143,7 +155,13 @@ async def test_history_is_passed_as_real_chat_roles(services: RecordedServices) 
     ]
     agent, model = build_agent(
         [
-            TurnInterpretation(intent="current", device="2", measurement="الضغط"),
+            interpretation(intent="current", device="2", measurement="الضغط"),
+            interpretation(
+                intent="current",
+                device_id=DEVICE_2,
+                device_name="جهاز 2",
+                measurement="الضغط",
+            ),
             "الضغط 2.1 بار.",
         ]
     )
@@ -161,8 +179,7 @@ async def test_missing_device_skips_all_apis_and_is_composed(
 ) -> None:
     agent, _ = build_agent(
         [
-            TurnInterpretation(intent="current", measurement="الضغط"),
-            "تقصد أنهي جهاز؟",
+            interpretation(intent="reply", reply="تقصد أنهي جهاز؟"),
         ]
     )
 
@@ -177,8 +194,8 @@ async def test_unknown_device_never_reaches_readings_api(
 ) -> None:
     agent, _ = build_agent(
         [
-            TurnInterpretation(intent="current", device="جهاز أحمد", measurement="الضغط"),
-            "الجهاز ده مش موجود في المحطة.",
+            interpretation(intent="current", device="جهاز أحمد", measurement="الضغط"),
+            interpretation(intent="reply", reply="الجهاز ده مش موجود في المحطة."),
         ]
     )
 
@@ -192,9 +209,17 @@ async def test_unknown_device_never_reaches_readings_api(
 async def test_historical_request_uses_validated_dates(services: RecordedServices) -> None:
     agent, _ = build_agent(
         [
-            TurnInterpretation(
+            interpretation(
                 intent="historical",
                 device="جهاز 2",
+                measurement="التدفق",
+                from_date="2026-07-01",
+                to_date="2026-07-07",
+            ),
+            interpretation(
+                intent="historical",
+                device_id=DEVICE_2,
+                device_name="جهاز 2",
                 measurement="التدفق",
                 from_date="2026-07-01",
                 to_date="2026-07-07",
@@ -213,9 +238,17 @@ async def test_historical_request_uses_validated_dates(services: RecordedService
 async def test_invalid_period_does_not_call_an_api(services: RecordedServices) -> None:
     agent, _ = build_agent(
         [
-            TurnInterpretation(
+            interpretation(
                 intent="historical",
                 device="1",
+                measurement="التدفق",
+                from_date="امبارح",
+                to_date="2026-07-01",
+            ),
+            interpretation(
+                intent="historical",
+                device_id=DEVICE_1,
+                device_name="جهاز 1",
                 measurement="التدفق",
                 from_date="امبارح",
                 to_date="2026-07-01",
@@ -227,7 +260,7 @@ async def test_invalid_period_does_not_call_an_api(services: RecordedServices) -
     reply = await run(agent)
 
     assert reply == "قولّي الفترة بالتاريخ بشكل أوضح."
-    assert services.devices_calls == 0
+    assert services.devices_calls == 1
     assert services.history_calls == []
 
 
@@ -240,7 +273,13 @@ async def test_empty_readings_are_composed_without_exposing_payload(
     monkeypatch.setattr(agent_module, "get_current_readings", empty_current)
     agent, model = build_agent(
         [
-            TurnInterpretation(intent="current", device="1", measurement="الحرارة"),
+            interpretation(intent="current", device="1", measurement="الحرارة"),
+            interpretation(
+                intent="current",
+                device_id=DEVICE_1,
+                device_name="جهاز 1",
+                measurement="الحرارة",
+            ),
             "مفيش قراءات متاحة للجهاز ده دلوقتي.",
         ]
     )
@@ -248,8 +287,7 @@ async def test_empty_readings_are_composed_without_exposing_payload(
     await run(agent)
 
     compose_input = json.loads(model.calls[-1][1][-1].content)
-    assert compose_input["outcome"] == "no_readings"
-    assert compose_input["data"] is None
+    assert compose_input["result"] == {"error": "no_readings"}
 
 
 async def test_api_failure_becomes_a_composable_outcome(
@@ -261,7 +299,7 @@ async def test_api_failure_becomes_a_composable_outcome(
     monkeypatch.setattr(agent_module, "get_devices", failing_devices)
     agent, model = build_agent(
         [
-            TurnInterpretation(intent="devices"),
+            interpretation(intent="devices"),
             "مش قادر أجيب بيانات الأجهزة دلوقتي، جرّب كمان شوية.",
         ]
     )
@@ -269,7 +307,9 @@ async def test_api_failure_becomes_a_composable_outcome(
     reply = await run(agent)
 
     assert reply == "مش قادر أجيب بيانات الأجهزة دلوقتي، جرّب كمان شوية."
-    assert json.loads(model.calls[-1][1][-1].content)["outcome"] == "api_failure"
+    assert json.loads(model.calls[-1][1][-1].content)["result"] == {
+        "error": "api_failure"
+    }
 
 
 @pytest.mark.parametrize(
@@ -279,7 +319,7 @@ async def test_api_failure_becomes_a_composable_outcome(
 async def test_composed_reply_is_cleaned(
     services: RecordedServices, content: str, expected: str
 ) -> None:
-    agent, _ = build_agent([TurnInterpretation(intent="devices"), content])
+    agent, _ = build_agent([interpretation(intent="devices"), content])
 
     assert await run(agent) == expected
 
@@ -293,7 +333,7 @@ async def test_model_failure_surfaces_as_llm_error() -> None:
 
 async def test_jwt_never_enters_model_messages(services: RecordedServices) -> None:
     agent, model = build_agent(
-        [TurnInterpretation(intent="devices"), "في المحطة جهازين."]
+        [interpretation(intent="devices"), "في المحطة جهازين."]
     )
 
     await run(agent)

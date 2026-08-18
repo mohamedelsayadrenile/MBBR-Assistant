@@ -18,7 +18,7 @@ def test_system_prompt_accepts_the_runtime_date() -> None:
         '"reply"',
         "conversation history",
         "Arabic-Indic",
-        "one-based position",
+        "exact id and name",
         "invent an API id",
     ],
 )
@@ -29,7 +29,6 @@ def test_system_prompt_contains_its_interpretation_rules(rule: str) -> None:
 @pytest.mark.parametrize(
     "outcome",
     [
-        "ask_device",
         "device_not_found",
         "invalid_period",
         "range_too_long",
@@ -37,7 +36,7 @@ def test_system_prompt_contains_its_interpretation_rules(rule: str) -> None:
         "api_failure",
     ],
 )
-def test_system_prompt_defines_every_graph_outcome(outcome: str) -> None:
+def test_system_prompt_defines_every_result_error(outcome: str) -> None:
     assert outcome in SYSTEM_PROMPT
 
 

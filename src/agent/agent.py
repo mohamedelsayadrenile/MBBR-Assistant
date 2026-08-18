@@ -2,14 +2,13 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Literal, TypedDict
+from typing import Any, TypedDict
 from zoneinfo import ZoneInfo
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
-from pydantic import BaseModel, Field
 
 from agent.llm import LLMError, build_llm, strip_thinking
 from agent.prompts import SYSTEM_PROMPT
@@ -25,42 +24,12 @@ logger = logging.getLogger(__name__)
 FALLBACK_RESPONSE = "معلش، مش قادر أوصل لإجابة واضحة دلوقتي."
 MAX_RANGE_DAYS = 31
 
-Intent = Literal["reply", "devices", "current", "historical"]
-Outcome = Literal[
-    "ask_device",
-    "device_not_found",
-    "invalid_period",
-    "range_too_long",
-    "no_readings",
-    "api_failure",
-]
-
-
-class TurnInterpretation(BaseModel):
-    """The only decision the LLM makes before the graph executes the request."""
-
-    intent: Intent
-    device: str | None = Field(
-        default=None,
-        description="Intended device name or one-based position, normalized from the conversation.",
-    )
-    measurement: str | None = None
-    from_date: str | None = Field(default=None, description="YYYY-MM-DD")
-    to_date: str | None = Field(default=None, description="YYYY-MM-DD")
-    reply: str | None = Field(
-        default=None,
-        description="Egyptian Arabic reply, used only when intent is reply.",
-    )
-
-
 class AgentState(TypedDict, total=False):
     history: list[MemoryMessage]
     user_message: str
-    turn: TurnInterpretation
-    date_range: tuple[date, date]
-    device: dict[str, Any]
-    payload: Any
-    outcome: Outcome
+    request: dict[str, Any]
+    devices: list[dict[str, Any]]
+    result: Any
     reply: str
 
 
@@ -94,22 +63,47 @@ class MBBRAgent:
         self._settings = settings
         self._llm = llm if llm is not None else build_llm(settings)
         self._interpreter = self._llm.with_structured_output(
-            TurnInterpretation, method="function_calling"
+            {
+                "title": "interpret_turn",
+                "description": "Interpret the operator's current turn.",
+                "type": "object",
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "enum": ["reply", "devices", "current", "historical"],
+                    },
+                    "device": {
+                        "type": "string",
+                        "description": "Device wording understood from the operator.",
+                    },
+                    "device_id": {
+                        "type": "string",
+                        "description": "Exact id from the supplied device list.",
+                    },
+                    "device_name": {
+                        "type": "string",
+                        "description": "Exact name from the supplied device list.",
+                    },
+                    "measurement": {"type": "string"},
+                    "from_date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "to_date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "reply": {
+                        "type": "string",
+                        "description": "Egyptian Arabic reply for reply intent.",
+                    },
+                },
+                "required": ["intent"],
+            },
+            method="function_calling",
         )
 
         graph = StateGraph(AgentState, context_schema=RunContext)
         graph.add_node("interpret", self._interpret)
-        graph.add_node("validate", self._validate)
-        graph.add_node("fetch", self._fetch)
+        graph.add_node("execute", self._execute)
         graph.add_node("compose", self._compose)
         graph.add_edge(START, "interpret")
-        graph.add_conditional_edges(
-            "interpret", self._after_interpret, {"end": END, "validate": "validate"}
-        )
-        graph.add_conditional_edges(
-            "validate", self._after_validate, {"fetch": "fetch", "compose": "compose"}
-        )
-        graph.add_edge("fetch", "compose")
+        graph.add_edge("interpret", "execute")
+        graph.add_edge("execute", "compose")
         graph.add_edge("compose", END)
         self._graph = graph.compile()
 
@@ -155,101 +149,115 @@ class MBBRAgent:
         )
         messages.append(HumanMessage(state["user_message"]))
 
-        turn = await self._interpreter.ainvoke(messages)
-        if not isinstance(turn, TurnInterpretation):
-            raise TypeError("LLM did not return a TurnInterpretation")
+        interpretation = await self._interpreter.ainvoke(messages)
+        if not isinstance(interpretation, dict) or "intent" not in interpretation:
+            raise TypeError("LLM did not return a structured interpretation")
 
-        update: dict[str, Any] = {"turn": turn}
-        if turn.intent == "reply":
-            update["reply"] = self._clean_reply(turn.reply)
+        update: dict[str, Any] = {"request": interpretation}
+        if interpretation["intent"] != "reply":
+            try:
+                devices = await get_devices(runtime.context.jwt, self._settings)
+            except MBBRAPIError:
+                logger.exception(
+                    "agent_devices_failed conversation_id=%s",
+                    runtime.context.conversation_id,
+                )
+                update["result"] = {"error": "api_failure"}
+            else:
+                update["devices"] = devices
+                if interpretation["intent"] in {"current", "historical"}:
+                    resolution = await self._interpreter.ainvoke(
+                        [
+                            SystemMessage(
+                                SYSTEM_PROMPT.format(
+                                    today=runtime.context.today.isoformat()
+                                )
+                            ),
+                            HumanMessage(
+                                json.dumps(
+                                    {
+                                        "interpretation": interpretation,
+                                        "available_devices": devices,
+                                    },
+                                    ensure_ascii=False,
+                                )
+                            ),
+                        ]
+                    )
+                    if not isinstance(resolution, dict) or "intent" not in resolution:
+                        raise TypeError("LLM did not return a device resolution")
+                    update["request"] = resolution
         logger.info(
             "agent_turn_interpreted conversation_id=%s intent=%s",
             runtime.context.conversation_id,
-            turn.intent,
+            update["request"]["intent"],
         )
         return update
 
-    @staticmethod
-    def _after_interpret(state: AgentState) -> Literal["end", "validate"]:
-        return "end" if state["turn"].intent == "reply" else "validate"
-
-    @staticmethod
-    def _validate(state: AgentState, runtime: Runtime[RunContext]) -> dict[str, Any]:
-        turn = state["turn"]
-        if turn.intent in {"current", "historical"} and not turn.device:
-            return {"outcome": "ask_device"}
-
-        if turn.intent != "historical":
-            return {}
-        if not turn.from_date or not turn.to_date:
-            return {"outcome": "invalid_period"}
-
-        date_range = parse_date_range(turn.from_date, turn.to_date, runtime.context.today)
-        if date_range is None:
-            return {"outcome": "invalid_period"}
-        if (date_range[1] - date_range[0]).days >= MAX_RANGE_DAYS:
-            return {"outcome": "range_too_long"}
-        return {"date_range": date_range}
-
-    @staticmethod
-    def _after_validate(state: AgentState) -> Literal["fetch", "compose"]:
-        return "compose" if state.get("outcome") else "fetch"
-
-    async def _fetch(
+    async def _execute(
         self, state: AgentState, runtime: Runtime[RunContext]
     ) -> dict[str, Any]:
-        turn = state["turn"]
-        try:
-            devices = await get_devices(runtime.context.jwt, self._settings)
-            if turn.intent == "devices":
-                return {"payload": [device["name"] for device in devices]}
+        if "result" in state:
+            return {}
+        request = state["request"]
+        if request["intent"] == "reply":
+            return {"result": request.get("reply")}
+        if request["intent"] == "devices":
+            return {"result": [device["name"] for device in state["devices"]]}
 
-            reference = (turn.device or "").strip()
-            device = next(
-                (
-                    device
-                    for index, device in enumerate(devices, start=1)
-                    if reference == device["id"]
-                    or reference == str(index)
-                    or reference.casefold() == device["name"].casefold()
-                ),
-                None,
+        device = next(
+            (
+                device
+                for device in state["devices"]
+                if device["id"] == request.get("device_id")
+            ),
+            None,
+        )
+        if device is None:
+            return {"result": {"error": "device_not_found"}}
+
+        if request["intent"] == "historical":
+            if not request.get("from_date") or not request.get("to_date"):
+                return {"result": {"error": "invalid_period"}}
+            date_range = parse_date_range(
+                request["from_date"], request["to_date"], runtime.context.today
             )
-            if device is None:
-                return {"outcome": "device_not_found"}
-            device_id = device["id"]
+            if date_range is None:
+                return {"result": {"error": "invalid_period"}}
+            if (date_range[1] - date_range[0]).days >= MAX_RANGE_DAYS:
+                return {"result": {"error": "range_too_long"}}
 
-            if turn.intent == "current":
+        try:
+            if request["intent"] == "current":
                 payload = await get_current_readings(
-                    runtime.context.jwt, device_id, self._settings
+                    runtime.context.jwt, device["id"], self._settings
                 )
                 if payload.get("count") == 0 or payload.get("readings") == []:
-                    return {
-                        "device": device,
-                        "outcome": "no_readings",
-                    }
+                    return {"result": {"error": "no_readings"}}
             else:
-                start, end = state["date_range"]
+                start, end = date_range
                 payload = await get_historical_readings(
-                    runtime.context.jwt, device_id, start, end, self._settings
+                    runtime.context.jwt, device["id"], start, end, self._settings
                 )
         except MBBRAPIError:
             logger.exception(
-                "agent_fetch_failed conversation_id=%s", runtime.context.conversation_id
+                "agent_execute_failed conversation_id=%s",
+                runtime.context.conversation_id,
             )
-            return {"outcome": "api_failure"}
+            return {"result": {"error": "api_failure"}}
 
-        return {"device": device, "payload": payload}
+        return {"result": {"device_name": device["name"], "data": payload}}
 
     async def _compose(
         self, state: AgentState, runtime: Runtime[RunContext]
     ) -> dict[str, str]:
-        device = state.get("device")
+        if state["request"]["intent"] == "reply":
+            return {"reply": self._clean_reply(state["result"])}
+
         prompt_input = {
-            "request": state["turn"].model_dump(),
-            "device_name": device.get("name") if device else None,
-            "outcome": state.get("outcome"),
-            "data": state.get("payload"),
+            "user_message": state["user_message"],
+            "request": state["request"],
+            "result": state["result"],
         }
         response = await self._llm.ainvoke(
             [
@@ -260,9 +268,8 @@ class MBBRAgent:
             ]
         )
         logger.info(
-            "agent_reply_composed conversation_id=%s outcome=%s",
+            "agent_reply_composed conversation_id=%s",
             runtime.context.conversation_id,
-            state.get("outcome", "success"),
         )
         return {"reply": self._clean_reply(response.text)}
 
