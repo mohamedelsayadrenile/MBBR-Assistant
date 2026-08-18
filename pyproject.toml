@@ -20,7 +20,8 @@ dependencies = [
     "voicetut-tts>=0.1.1",
     # voicetut-tts imports omnivoice at load time but does not declare it.
     "omnivoice>=0.1.5",
-    "crewai>=1.15.16",
+    "langgraph>=1.2.11",
+    "langchain-openai>=1.5.1",
 ]
 
 [dependency-groups]

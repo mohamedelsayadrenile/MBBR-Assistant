@@ -4,42 +4,37 @@ from agent.llm import build_llm, strip_thinking
 from tests.settings_factory import build_settings
 
 
-def test_extra_body_is_omitted_when_the_vllm_knobs_are_unset() -> None:
-    # The Qwen API can reject unknown fields, so an unset knob must not be sent.
+def test_extra_body_is_omitted_when_vllm_knobs_are_unset() -> None:
     llm = build_llm(build_settings(LLM_TOP_K="", LLM_ENABLE_THINKING=""))
 
-    assert llm.additional_params.get("extra_body") is None
+    assert llm.extra_body is None
 
 
-def test_extra_body_carries_the_vllm_knobs_when_configured() -> None:
+def test_extra_body_carries_configured_vllm_knobs() -> None:
     llm = build_llm(build_settings(LLM_TOP_K=20, LLM_ENABLE_THINKING=False))
 
-    assert llm.additional_params["extra_body"] == {
+    assert llm.extra_body == {
         "top_k": 20,
         "chat_template_kwargs": {"enable_thinking": False},
     }
 
 
-def test_settings_reach_the_llm_handle() -> None:
+def test_settings_reach_chat_openai() -> None:
     llm = build_llm(build_settings())
 
-    assert llm.base_url == "http://llm.test/v1"
-    assert llm.api_key == "test-key"
+    assert llm.openai_api_base == "http://llm.test/v1"
+    assert llm.openai_api_key.get_secret_value() == "test-key"
     assert llm.temperature == 0.2
     assert llm.max_tokens == 1024
     assert llm.top_p == 0.8
+    assert llm.max_retries == 0
 
 
 @pytest.mark.parametrize(
     "model", ["qwen3.6-35b-a3b", "openai/qwen3.6-35b-a3b"]
 )
-def test_a_bare_model_id_is_pinned_to_the_openai_compatible_client(model: str) -> None:
-    # CrewAI cannot infer a provider from a bare id, and rejects the model
-    # outright unless one is named.
-    llm = build_llm(build_settings(LLM_MODEL=model))
-
-    assert llm.provider == "openai"
-    assert llm.model == "qwen3.6-35b-a3b"
+def test_model_id_is_normalized_for_chat_openai(model: str) -> None:
+    assert build_llm(build_settings(LLM_MODEL=model)).model_name == "qwen3.6-35b-a3b"
 
 
 @pytest.mark.parametrize(
@@ -50,5 +45,5 @@ def test_a_bare_model_id_is_pinned_to_the_openai_compatible_client(model: str) -
         (None, None),
     ],
 )
-def test_a_thinking_block_is_stripped(content: str | None, expected: str | None) -> None:
+def test_thinking_block_is_stripped(content: str | None, expected: str | None) -> None:
     assert strip_thinking(content) == expected
