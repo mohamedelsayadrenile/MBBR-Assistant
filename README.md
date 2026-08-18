@@ -29,7 +29,7 @@ src/
 ├── agent/
 │   ├── agent.py        # four-node graph, state, routing, and validation
 │   ├── llm.py          # ChatOpenAI from settings, LLMError, <think> stripping
-│   └── prompts.py      # interpretation and response prompts
+│   └── prompts.py      # shared interpretation and response system prompt
 ├── services/
 │   ├── asr/            # interface + factory + providers/cohere.py
 │   ├── tts/            # interface + factory + providers/voicetut.py + voices.py

@@ -12,7 +12,7 @@ from langgraph.runtime import Runtime
 from pydantic import BaseModel, Field
 
 from agent.llm import LLMError, build_llm, strip_thinking
-from agent.prompts import COMPOSE_PROMPT, INTERPRET_PROMPT
+from agent.prompts import SYSTEM_PROMPT
 from core.config import Settings
 from services.devices import get_devices
 from services.history import get_historical_readings
@@ -69,23 +69,6 @@ class RunContext:
     conversation_id: str
     jwt: str
     today: date
-
-
-def resolve_device_id(raw_device: str, devices: list[dict[str, Any]]) -> str | None:
-    """Accept only a real id, exact name, or one-based position from the live list."""
-    candidate = raw_device.strip()
-    if not candidate:
-        return None
-
-    for device in devices:
-        if candidate == device["id"]:
-            return device["id"]
-
-    folded = candidate.casefold()
-    for index, device in enumerate(devices, start=1):
-        if candidate == str(index) or folded == device["name"].casefold():
-            return device["id"]
-    return None
 
 
 def parse_date_range(raw_from: str, raw_to: str, today: date) -> tuple[date, date] | None:
@@ -159,7 +142,7 @@ class MBBRAgent:
     ) -> dict[str, Any]:
         messages: list[SystemMessage | HumanMessage | AIMessage] = [
             SystemMessage(
-                INTERPRET_PROMPT.format(
+                SYSTEM_PROMPT.format(
                     today=runtime.context.today.isoformat(),
                 )
             )
@@ -221,10 +204,20 @@ class MBBRAgent:
             if turn.intent == "devices":
                 return {"payload": [device["name"] for device in devices]}
 
-            device_id = resolve_device_id(turn.device or "", devices)
-            if device_id is None:
+            reference = (turn.device or "").strip()
+            device = next(
+                (
+                    device
+                    for index, device in enumerate(devices, start=1)
+                    if reference == device["id"]
+                    or reference == str(index)
+                    or reference.casefold() == device["name"].casefold()
+                ),
+                None,
+            )
+            if device is None:
                 return {"outcome": "device_not_found"}
-            device = next(device for device in devices if device["id"] == device_id)
+            device_id = device["id"]
 
             if turn.intent == "current":
                 payload = await get_current_readings(
@@ -260,7 +253,9 @@ class MBBRAgent:
         }
         response = await self._llm.ainvoke(
             [
-                SystemMessage(COMPOSE_PROMPT),
+                SystemMessage(
+                    SYSTEM_PROMPT.format(today=runtime.context.today.isoformat())
+                ),
                 HumanMessage(json.dumps(prompt_input, ensure_ascii=False, default=str)),
             ]
         )

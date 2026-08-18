@@ -1,10 +1,10 @@
 import pytest
 
-from agent.prompts import COMPOSE_PROMPT, INTERPRET_PROMPT
+from agent.prompts import SYSTEM_PROMPT
 
 
-def test_interpret_prompt_accepts_the_runtime_date() -> None:
-    prompt = INTERPRET_PROMPT.format(today="2026-08-17")
+def test_system_prompt_accepts_the_runtime_date() -> None:
+    prompt = SYSTEM_PROMPT.format(today="2026-08-17")
 
     assert "Today is 2026-08-17" in prompt
 
@@ -12,18 +12,18 @@ def test_interpret_prompt_accepts_the_runtime_date() -> None:
 @pytest.mark.parametrize(
     "rule",
     [
-        'intent "devices"',
-        'intent "current"',
-        'intent "historical"',
-        'intent "reply"',
+        '"devices"',
+        '"current"',
+        '"historical"',
+        '"reply"',
         "conversation history",
         "Arabic-Indic",
         "one-based position",
         "invent an API id",
     ],
 )
-def test_interpret_prompt_contains_its_decision_rules(rule: str) -> None:
-    assert rule in INTERPRET_PROMPT
+def test_system_prompt_contains_its_interpretation_rules(rule: str) -> None:
+    assert rule in SYSTEM_PROMPT
 
 
 @pytest.mark.parametrize(
@@ -37,11 +37,11 @@ def test_interpret_prompt_contains_its_decision_rules(rule: str) -> None:
         "api_failure",
     ],
 )
-def test_compose_prompt_defines_every_graph_outcome(outcome: str) -> None:
-    assert outcome in COMPOSE_PROMPT
+def test_system_prompt_defines_every_graph_outcome(outcome: str) -> None:
+    assert outcome in SYSTEM_PROMPT
 
 
-def test_compose_prompt_requires_grounded_spoken_arabic() -> None:
-    assert "Egyptian Arabic" in COMPOSE_PROMPT
-    assert "Use only that input" in COMPOSE_PROMPT
-    assert "device ids" in COMPOSE_PROMPT
+def test_system_prompt_requires_grounded_spoken_arabic() -> None:
+    assert "Egyptian Arabic" in SYSTEM_PROMPT
+    assert "Use only that input" in SYSTEM_PROMPT
+    assert "device ids" in SYSTEM_PROMPT
