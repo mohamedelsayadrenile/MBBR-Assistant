@@ -13,9 +13,10 @@ async def get_historical_readings(
 ) -> dict[str, Any]:
     """Return daily-average sensor readings for one device over a past period.
 
-    Like `get_current_readings`, the `data` object is passed through untouched:
-    the sensor/daily shape is read by the LLM, not pinned in code, so an upstream
-    change remains a prompt concern rather than a code change.
+    Like `get_current_readings`, the `data` object is passed through untouched.
+    Every measurement the device reports is listed, with an empty `daily` series
+    when the period holds no values — so a listed sensor with no averages is a
+    missing reading, not a missing sensor.
     """
     from_iso = start.isoformat()
     to_iso = end.isoformat()

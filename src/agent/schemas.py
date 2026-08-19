@@ -32,7 +32,7 @@ INTERPRET_SCHEMA: dict[str, Any] = {
         },
         "sensor": {
             "type": "string",
-            "description": 'The measurement requested, or "all" for every reading.',
+            "description": 'The measurement exactly as the operator worded it, or "all".',
         },
         "device_name": {
             "type": "string",
@@ -78,4 +78,17 @@ RESOLVER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status"],
+}
+
+SENSOR_SCHEMA: dict[str, Any] = {
+    "title": "resolve_sensor",
+    "description": "Match the operator's measurement wording to a sensor the device reports.",
+    "type": "object",
+    "properties": {
+        "sensor_type": {
+            "type": "string",
+            "description": "Exact sensor name copied from the supplied list; empty if none matches.",
+        },
+    },
+    "required": ["sensor_type"],
 }

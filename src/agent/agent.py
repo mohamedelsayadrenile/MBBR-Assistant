@@ -8,7 +8,13 @@ from langgraph.graph import END, START, StateGraph
 
 from agent.llm import LLMError, build_llm
 from agent.nodes import FALLBACK_RESPONSE, compose, execute, interpret
-from agent.schemas import INTERPRET_SCHEMA, RESOLVER_SCHEMA, AgentState, RunContext
+from agent.schemas import (
+    INTERPRET_SCHEMA,
+    RESOLVER_SCHEMA,
+    SENSOR_SCHEMA,
+    AgentState,
+    RunContext,
+)
 from core.config import Settings
 from services.memory import MemoryMessage
 
@@ -26,6 +32,9 @@ class MBBRAgent:
         )
         self._resolver = self._llm.with_structured_output(
             RESOLVER_SCHEMA, method="function_calling"
+        )
+        self._sensor_resolver = self._llm.with_structured_output(
+            SENSOR_SCHEMA, method="function_calling"
         )
 
         graph = StateGraph(AgentState, context_schema=RunContext)

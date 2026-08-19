@@ -1,6 +1,11 @@
 import pytest
 
-from agent.prompts import COMPOSE_PROMPT, DEVICE_RESOLVER_PROMPT, SYSTEM_PROMPT
+from agent.prompts import (
+    COMPOSE_PROMPT,
+    DEVICE_RESOLVER_PROMPT,
+    SENSOR_RESOLVER_PROMPT,
+    SYSTEM_PROMPT,
+)
 
 
 def test_system_prompt_accepts_the_runtime_date() -> None:
@@ -43,7 +48,7 @@ def test_system_prompt_keeps_reply_for_conversational_only() -> None:
 
 
 def test_system_prompt_does_not_let_the_model_resolve_devices() -> None:
-    assert "Never resolve or match device wording" in SYSTEM_PROMPT
+    assert "Never resolve or match device or measurement wording" in SYSTEM_PROMPT
     assert "تقصد أي جهاز؟" not in SYSTEM_PROMPT
 
 
@@ -86,6 +91,7 @@ def test_compose_prompt_defines_every_result_error() -> None:
         "range_too_long",
         "no_readings",
         "api_failure",
+        "sensor_not_supported",
     ]:
         assert f"`{outcome}`" in COMPOSE_PROMPT
 
@@ -105,3 +111,28 @@ def test_compose_prompt_requires_grounded_spoken_arabic() -> None:
     assert "Egyptian Arabic" in COMPOSE_PROMPT
     assert "Use only what is in the supplied input" in COMPOSE_PROMPT
     assert "device ids" in COMPOSE_PROMPT
+
+
+@pytest.mark.parametrize("invented", ["water_level", "turbidity", "flow rate"])
+def test_system_prompt_no_longer_invents_english_sensor_names(invented: str) -> None:
+    # The measurement is matched against what the device reports, so a made-up
+    # vocabulary here would only produce names nothing can match.
+    assert invented not in SYSTEM_PROMPT
+
+
+def test_system_prompt_keeps_the_operator_wording_for_the_sensor() -> None:
+    assert "the measurement exactly as the operator worded it" in SYSTEM_PROMPT
+    assert '"all"' in SYSTEM_PROMPT
+
+
+def test_sensor_resolver_prompt_matches_against_the_reported_list() -> None:
+    assert "type_ar" in SENSOR_RESOLVER_PROMPT
+    assert "VERBATIM" in SENSOR_RESOLVER_PROMPT
+    assert "empty `sensor_type`" in SENSOR_RESOLVER_PROMPT
+    assert "never invent" in SENSOR_RESOLVER_PROMPT
+
+
+def test_compose_prompt_separates_unsupported_from_missing_readings() -> None:
+    assert "already filtered" in COMPOSE_PROMPT.lower()
+    assert "`device_sensors`" in COMPOSE_PROMPT
+    assert "Never phrase this" in COMPOSE_PROMPT

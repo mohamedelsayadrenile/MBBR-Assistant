@@ -6,9 +6,22 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 from agent.llm import strip_thinking
-from agent.prompts import COMPOSE_PROMPT, DEVICE_RESOLVER_PROMPT, SYSTEM_PROMPT
+from agent.prompts import (
+    COMPOSE_PROMPT,
+    DEVICE_RESOLVER_PROMPT,
+    SENSOR_RESOLVER_PROMPT,
+    SYSTEM_PROMPT,
+)
 from agent.schemas import AgentState, RunContext
-from agent.utils import match_by_id, parse_date_range, real_candidates
+from agent.utils import (
+    match_by_id,
+    match_sensor,
+    narrow_current,
+    narrow_daily,
+    parse_date_range,
+    payload_sensors,
+    real_candidates,
+)
 from services.devices import get_devices
 from services.history import get_historical_readings
 from services.mbbr_api import MBBRAPIError
@@ -97,7 +110,9 @@ async def execute(
                 "agent_devices_failed conversation_id=%s", conversation_id
             )
             return {"result": {"error": "api_failure"}}
-        return {"result": {"devices": devices}}
+        # Counted here, not in the prompt: asked to tally a list of this length
+        # the model quietly misses one (33 devices were reported as 32).
+        return {"result": {"devices": devices, "count": len(devices)}}
 
     if not request.get("sensor"):
         return {"result": {"error": "ask_measurement"}}
@@ -166,8 +181,6 @@ async def execute(
             payload = await get_current_readings(
                 runtime.context.jwt, resolved["device_id"], agent._settings
             )
-            if payload.get("count") == 0 or payload.get("readings") == []:
-                return {"result": {"error": "no_readings"}, "resolution": resolved}
         else:
             start, end = date_range
             payload = await get_historical_readings(
@@ -183,6 +196,55 @@ async def execute(
             conversation_id,
         )
         return {"result": {"error": "api_failure"}, "resolution": resolved}
+
+    # What the device reports IS the payload: a measurement in it is available,
+    # one absent from it is not. An empty payload means the device sent nothing
+    # at all, which is a missing reading rather than a missing sensor.
+    sensors = payload_sensors(payload)
+    if not sensors:
+        return {"result": {"error": "no_readings"}, "resolution": resolved}
+
+    requested = request.get("sensor")
+    if requested != "all":
+        resolution = await _resolve_sensor(agent, requested, sensors)
+        sensor = match_sensor(resolution.get("sensor_type"), sensors)
+        if sensor is None:
+            if resolution.get("sensor_type"):
+                logger.warning(
+                    "agent_sensor_resolution_untrusted conversation_id=%s sensor_type=%s",
+                    conversation_id,
+                    resolution.get("sensor_type"),
+                )
+            logger.info(
+                "agent_sensor_not_supported conversation_id=%s device_id=%s",
+                conversation_id,
+                resolved["device_id"],
+            )
+            return {
+                "result": {
+                    "error": "sensor_not_supported",
+                    "device_name": resolved["device_name"],
+                    "device_sensors": [
+                        entry["type_ar"] or entry["type"] for entry in sensors
+                    ],
+                },
+                "resolution": resolved,
+            }
+
+        logger.info(
+            "agent_sensor_resolved conversation_id=%s device_id=%s sensor_type=%s",
+            conversation_id,
+            resolved["device_id"],
+            sensor["type"],
+        )
+        narrow = narrow_current if intent == "current" else narrow_daily
+        payload = narrow(payload, sensor["type"])
+        # A daily-averages sensor is listed even with an empty `daily` series, so
+        # the narrowed payload can still hold no actual values.
+        if intent == "historical" and not any(
+            entry.get("daily") for entry in payload.get("sensors") or []
+        ):
+            return {"result": {"error": "no_readings"}, "resolution": resolved}
 
     return {
         "resolution": resolved,
@@ -209,6 +271,25 @@ async def _resolve_device(
     )
     if not isinstance(response, dict) or "status" not in response:
         raise TypeError("LLM did not return a structured device resolution")
+    return response
+
+
+async def _resolve_sensor(
+    agent: "MBBRAgent", user_sensor: str, sensors: list[dict[str, Any]]
+) -> dict[str, Any]:
+    response = await agent._sensor_resolver.ainvoke(
+        [
+            SystemMessage(SENSOR_RESOLVER_PROMPT),
+            HumanMessage(
+                json.dumps(
+                    {"user_sensor": user_sensor, "sensors": sensors},
+                    ensure_ascii=False,
+                )
+            ),
+        ]
+    )
+    if not isinstance(response, dict):
+        raise TypeError("LLM did not return a structured sensor resolution")
     return response
 
 

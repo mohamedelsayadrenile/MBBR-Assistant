@@ -196,13 +196,17 @@ conversational turns are answered or asked about without any API call; a
 answers only from it; a sensor question resolves the device first — fetching
 the live list and running a dedicated LLM device resolver
 (`matched` / `ambiguous` / `not_found`) against it, verifying the returned id
-before any readings API is touched. `compose` emits a fixed clarification when
-one is still pending, otherwise answers from the trusted result.
+before any readings API is touched. Once the readings are in, a second small
+resolver matches the requested measurement against what that payload actually
+reports, and Python verifies the answer before the value is read out — see
+[Measurement support](#measurement-support).  `compose` emits a fixed
+clarification when one is still pending, otherwise answers from the trusted
+result.
 
 There are no model tools, agent loops, retries, worker threads, sync wrappers,
 checkpoints, or custom reducers. There is no Python fuzzy matcher: matching the
-operator's wording to a real device is an LLM resolver step that sees the live
-list. The assistant never invents data — it answers only from the device list it
+operator's wording to a real device — or to a real measurement — is an LLM
+resolver step that sees the live values, floored by an exact check in code. The assistant never invents data — it answers only from the device list it
 fetched and the readings it retrieved. Redis remains the only cross-turn memory.
 
 **The JWT is never in graph state, a prompt, Redis, or a log line.** It is passed
@@ -251,18 +255,39 @@ the list is treated as `not_found`. No readings API receives an unverified id.
 
 ### Measurement support
 
-The requested measurement is checked against what the chosen device actually returns,
-for every measurement type — water temperature, flow rate, pH, humidity, pressure, or
-anything else in the payload. If the reading is there, the assistant reads out its
-value; if the device returned readings but not that one, it says so plainly
-(«جهاز 1 مش بيقيس درجة حرارة الميه.») without listing the device's other sensors or
-steering the operator to a different device. A device with no readings at all is a
-separate case, and keeps its own wording.
+What a device reports **is** the payload it returns: a measurement present in the
+response is available, one absent from it is not. The check is deterministic Python,
+not a prompt judgement.
 
-This lives in the prompt rather than in code because [readings.py](src/services/readings.py)
-passes the payload through untouched — the live API returns `count: 0` for every device
-today, so the sensor field names are unverified and pinning them down in Python would
-be guesswork.
+The operator's wording is matched to a reported measurement the same way a device
+name is matched to the live list — a small resolver step sees only that device's
+reported measurements (`type`, the Arabic `type_ar`, and the unit) and copies one
+`type` back. `match_sensor` in [utils.py](src/agent/utils.py) then floors the answer
+against the payload, so a name the payload never carried cannot reach the reply. The
+interpretation model passes the operator's wording through verbatim and never invents
+an English sensor name; the naming is not consistent between devices (`PH` and `ph`,
+`Flow` and `flow_rate`, `LEVEL3` and `water_level`), so no vocabulary is pinned in
+code, and no alias table or fuzzy matcher exists.
+
+Three outcomes, kept distinct:
+
+- **The measurement is reported.** `narrow_current` / `narrow_daily` reduce the
+  payload to that one measurement — recomputing `count` — before compose sees it, so
+  the reply reads a value that is provably there rather than picking one out of a
+  list.
+- **The payload has measurements but not that one** → `sensor_not_supported`, which
+  carries the device name and the Arabic names of what it does report. The reply says
+  both («جهاز 2 مش بيقيس الحرارة، بيقيس الحموضة والتدفق.»).
+- **The payload is empty** (`count: 0`, or `sensors: []`) → `no_readings`, unchanged.
+  A device that sent nothing has a missing reading, not a missing sensor, so this is
+  never phrased as the device not measuring the thing. A daily-averages sensor listed
+  with an empty `daily` series lands here too.
+
+Note the consequence of using the readings payload as the only source: most devices
+are `offline` and return `count: 0`, so on the current-reading path they fall into the
+`no_readings` case and the support check does not fire. A device reporting only some
+of its sensors will call a real-but-silent one unsupported. This is accepted in
+exchange for having a single source of truth and no extra endpoint.
 
 ## Memory
 
@@ -284,10 +309,16 @@ no GPU.
 
 ## Notes
 
-- **Readings shape is unverified upstream.** The live API returns `count: 0` for
-  every device, so `get_current_readings` passes the `data` object to the model
-  untouched rather than mapping fields that might not exist. A change in the sensor
-  payload is a prompt concern, not a code change.
+- **The two readings endpoints name the same fields differently.** A latest reading
+  carries `sensor_type` / `sensor_type_ar` / `measurement_unit` (plus `value`, or
+  `operational_status` and a null unit for a valve or pump); a daily-averages sensor
+  carries `name` / `name_ar` / `unit` / `daily`. `payload_sensors` in
+  [utils.py](src/agent/utils.py) is the only place that knows both, so the support
+  check and the narrowing helpers stay shape-blind. The services still pass `data`
+  through untouched.
+- **`readings/latest` lists only sensors that have a stored reading**, not everything
+  a device is wired for — which is why an empty payload is `no_readings` rather than
+  "measures nothing".
 - **`LLM_TOP_K` and `LLM_ENABLE_THINKING` are vLLM-server extensions.** Leave them
   blank on the Qwen API; when unset they are dropped from the request entirely, so
   a hosted endpoint never sees an unknown field.

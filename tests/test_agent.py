@@ -20,12 +20,56 @@ DEVICES = [
     {"id": DEVICE_1, "name": "جهاز 1"},
     {"id": DEVICE_2, "name": "جهاز 2"},
 ]
+# The real shape, captured from GET /api/readings/latest. Only sensors that
+# actually have a stored reading appear here.
+def reading(sensor_type: str, sensor_type_ar: str, unit: str, value: float) -> dict[str, Any]:
+    return {
+        "device_id": DEVICE_2,
+        "device_name": "جهاز 2",
+        "sensor_id": "43b922f1-a5b1-4882-ba5a-8d908bdcddee",
+        "sensor_type": sensor_type,
+        "sensor_type_ar": sensor_type_ar,
+        "measurement_unit": unit,
+        "kind": "analog",
+        "operational_type": None,
+        "value": value,
+        "status": "NORMAL",
+        "severity": "NORMAL",
+        "operational_status": None,
+        "recorded_at": "2026-08-19T09:16:53.011Z",
+        "quality": "GOOD",
+    }
+
+
 READINGS = {
-    "count": 1,
-    "readings": [{"sensor": "water_temperature", "value": 24.7, "unit": "C"}],
+    "generated_at": "2026-08-19T09:16:53.011Z",
+    "count": 2,
+    "readings": [
+        reading("PH", "درجة الحموضة", "pH", 7.4),
+        reading("Flow", "معدل التدفق", "m³/h", 42.0),
+    ],
 }
 
-KINDS = {"interpret_turn": "interpret", "resolve_device": "resolve"}
+# The real shape of GET /api/telemetry/daily-averages: every reported sensor is
+# listed, with an empty `daily` when the period holds no values.
+HISTORY = {
+    "device_name": "جهاز 2",
+    "sensors": [
+        {
+            "name": "PH",
+            "name_ar": "درجة الحموضة",
+            "unit": "pH",
+            "daily": [{"day": "2026-07-01", "avg": 7.4}],
+        },
+        {"name": "Flow", "name_ar": "معدل التدفق", "unit": "m³/h", "daily": []},
+    ],
+}
+
+KINDS = {
+    "interpret_turn": "interpret",
+    "resolve_device": "resolve",
+    "resolve_sensor": "sensor",
+}
 
 
 class StructuredModel:
@@ -94,7 +138,7 @@ def services(monkeypatch: pytest.MonkeyPatch) -> RecordedServices:
     ) -> dict[str, Any]:
         assert jwt == "runtime-jwt"
         recorded.history_calls.append((device_id, start, end))
-        return {"device_name": "جهاز 2", "sensors": []}
+        return HISTORY
 
     monkeypatch.setattr(nodes_module, "get_devices", fake_devices)
     monkeypatch.setattr(nodes_module, "get_current_readings", fake_current)
@@ -113,6 +157,10 @@ def interpretation(**fields: Any) -> dict[str, Any]:
 
 def resolution(**fields: Any) -> dict[str, Any]:
     return fields
+
+
+def sensor(sensor_type: str) -> dict[str, Any]:
+    return {"sensor_type": sensor_type}
 
 
 async def run(agent: MBBRAgent, history: list[MemoryMessage] | None = None) -> str:
@@ -199,7 +247,7 @@ async def test_station_question_answers_from_the_device_list(
     assert services.devices_calls == 1
     assert services.current_ids == []
     assert calls_of(model) == ["interpret", "compose"]
-    assert last_input(model)["result"] == {"devices": DEVICES}
+    assert last_input(model)["result"] == {"devices": DEVICES, "count": 2}
 
 
 async def test_station_api_failure_becomes_a_composable_outcome(
@@ -227,20 +275,19 @@ async def test_current_reading_follows_the_linear_graph(
 ) -> None:
     agent, model = build_agent(
         [
-            interpretation(
-                intent="current", sensor="درجة حرارة الماية", device_name="2"
-            ),
+            interpretation(intent="current", sensor="الحموضة", device_name="2"),
             resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
-            "درجة حرارة الماية 24.7 درجة مئوية.",
+            sensor("PH"),
+            "الحموضة دلوقتي 7.4.",
         ]
     )
 
     reply = await run(agent)
 
-    assert reply == "درجة حرارة الماية 24.7 درجة مئوية."
+    assert reply == "الحموضة دلوقتي 7.4."
     assert services.devices_calls == 1
     assert services.current_ids == [DEVICE_2]
-    assert calls_of(model) == ["interpret", "resolve", "compose"]
+    assert calls_of(model) == ["interpret", "resolve", "sensor", "compose"]
     resolver_input = input_of(model, "resolve")
     assert resolver_input["available_devices"] == DEVICES
     assert resolver_input["user_device"] == "2"
@@ -253,9 +300,10 @@ async def test_history_is_passed_as_real_chat_roles(services: RecordedServices) 
     ]
     agent, model = build_agent(
         [
-            interpretation(intent="current", sensor="الضغط", device_name="2"),
+            interpretation(intent="current", sensor="الحموضة", device_name="2"),
             resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
-            "الضغط 2.1 بار.",
+            sensor("PH"),
+            "الحموضة 7.4.",
         ]
     )
 
@@ -309,17 +357,16 @@ async def test_device_follow_up_recovers_the_pending_sensor(
     ]
     agent, _ = build_agent(
         [
-            interpretation(
-                intent="current", sensor="مستوى الماية", device_name="جهاز 2"
-            ),
+            interpretation(intent="current", sensor="الحموضة", device_name="جهاز 2"),
             resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
-            "مستوى الماية 1.4 متر.",
+            sensor("PH"),
+            "الحموضة 7.4.",
         ]
     )
 
     reply = await run(agent, history)
 
-    assert reply == "مستوى الماية 1.4 متر."
+    assert reply == "الحموضة 7.4."
     assert services.current_ids == [DEVICE_2]
 
 
@@ -395,6 +442,7 @@ async def test_historical_request_uses_validated_dates(
                 to_date="2026-07-07",
             ),
             resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
+            sensor("Flow"),
             "مفيش قراءات مسجلة للفترة دي.",
         ]
     )
@@ -502,8 +550,9 @@ async def test_composed_reply_is_cleaned(
 ) -> None:
     agent, _ = build_agent(
         [
-            interpretation(intent="current", sensor="الضغط", device_name="جهاز 1"),
+            interpretation(intent="current", sensor="الحموضة", device_name="جهاز 1"),
             resolution(status="matched", device_id=DEVICE_1, device_name="جهاز 1"),
+            sensor("PH"),
             content,
         ]
     )
@@ -521,9 +570,10 @@ async def test_model_failure_surfaces_as_llm_error() -> None:
 async def test_jwt_never_enters_model_messages(services: RecordedServices) -> None:
     agent, model = build_agent(
         [
-            interpretation(intent="current", sensor="الضغط", device_name="جهاز 1"),
+            interpretation(intent="current", sensor="الحموضة", device_name="جهاز 1"),
             resolution(status="matched", device_id=DEVICE_1, device_name="جهاز 1"),
-            "الضغط 2.1 بار.",
+            sensor("PH"),
+            "الحموضة 7.4.",
         ]
     )
 
@@ -534,3 +584,174 @@ async def test_jwt_never_enters_model_messages(services: RecordedServices) -> No
         ensure_ascii=False,
     )
     assert "runtime-jwt" not in serialized
+
+
+async def test_unsupported_sensor_never_reaches_a_value(
+    services: RecordedServices,
+) -> None:
+    # جهاز 2 reports pH and flow; the operator asks for temperature.
+    agent, model = build_agent(
+        [
+            interpretation(intent="current", sensor="الحرارة", device_name="جهاز 2"),
+            resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
+            sensor(""),
+            "جهاز 2 مش بيقيس الحرارة، بيقيس الحموضة والتدفق.",
+        ]
+    )
+
+    reply = await run(agent)
+
+    assert reply == "جهاز 2 مش بيقيس الحرارة، بيقيس الحموضة والتدفق."
+    assert calls_of(model) == ["interpret", "resolve", "sensor", "compose"]
+    assert last_input(model)["result"] == {
+        "error": "sensor_not_supported",
+        "device_name": "جهاز 2",
+        "device_sensors": ["درجة الحموضة", "معدل التدفق"],
+    }
+
+
+async def test_untrusted_sensor_type_is_treated_as_unsupported(
+    services: RecordedServices,
+) -> None:
+    # A name the payload does not carry must not survive into the reply.
+    agent, model = build_agent(
+        [
+            interpretation(intent="current", sensor="الحرارة", device_name="جهاز 2"),
+            resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
+            sensor("temperature"),
+            "جهاز 2 مش بيقيس الحرارة.",
+        ]
+    )
+
+    await run(agent)
+
+    assert last_input(model)["result"]["error"] == "sensor_not_supported"
+
+
+async def test_supported_sensor_is_narrowed_to_one_reading(
+    services: RecordedServices,
+) -> None:
+    agent, model = build_agent(
+        [
+            interpretation(intent="current", sensor="الحموضة", device_name="جهاز 2"),
+            resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
+            sensor("PH"),
+            "الحموضة دلوقتي 7.4.",
+        ]
+    )
+
+    await run(agent)
+
+    data = last_input(model)["result"]["data"]
+    assert data["count"] == 1
+    assert [entry["sensor_type"] for entry in data["readings"]] == ["PH"]
+
+
+async def test_sensor_resolution_is_skipped_for_all_readings(
+    services: RecordedServices,
+) -> None:
+    agent, model = build_agent(
+        [
+            interpretation(intent="current", sensor="all", device_name="جهاز 2"),
+            resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
+            "الحموضة 7.4 والتدفق 42.",
+        ]
+    )
+
+    await run(agent)
+
+    assert calls_of(model) == ["interpret", "resolve", "compose"]
+    assert last_input(model)["result"]["data"] == READINGS
+
+
+async def test_empty_payload_skips_sensor_resolution(
+    monkeypatch: pytest.MonkeyPatch, services: RecordedServices
+) -> None:
+    # An offline device sends nothing; that is a missing reading, not a missing
+    # sensor, so the support question is never asked.
+    async def empty_current(*_: Any) -> dict[str, Any]:
+        return {"count": 0, "readings": []}
+
+    monkeypatch.setattr(nodes_module, "get_current_readings", empty_current)
+    agent, model = build_agent(
+        [
+            interpretation(intent="current", sensor="الحرارة", device_name="جهاز 1"),
+            resolution(status="matched", device_id=DEVICE_1, device_name="جهاز 1"),
+            "مفيش قراءات متاحة للجهاز ده دلوقتي.",
+        ]
+    )
+
+    await run(agent)
+
+    assert calls_of(model) == ["interpret", "resolve", "compose"]
+    assert last_input(model)["result"] == {"error": "no_readings"}
+
+
+async def test_historical_sensor_is_narrowed_to_its_own_series(
+    services: RecordedServices,
+) -> None:
+    agent, model = build_agent(
+        [
+            interpretation(
+                intent="historical",
+                sensor="الحموضة",
+                device_name="جهاز 2",
+                from_date="2026-07-01",
+                to_date="2026-07-07",
+            ),
+            resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
+            sensor("PH"),
+            "متوسط الحموضة كان 7.4.",
+        ]
+    )
+
+    await run(agent)
+
+    sensors = last_input(model)["result"]["data"]["sensors"]
+    assert [entry["name"] for entry in sensors] == ["PH"]
+
+
+async def test_reported_sensor_without_daily_values_is_no_readings(
+    services: RecordedServices,
+) -> None:
+    # Flow is reported by the device but holds no averages for the period.
+    agent, model = build_agent(
+        [
+            interpretation(
+                intent="historical",
+                sensor="التدفق",
+                device_name="جهاز 2",
+                from_date="2026-07-01",
+                to_date="2026-07-07",
+            ),
+            resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
+            sensor("Flow"),
+            "مفيش قراءات في الفترة دي.",
+        ]
+    )
+
+    await run(agent)
+
+    assert last_input(model)["result"] == {"error": "no_readings"}
+
+
+async def test_sensor_resolver_sees_only_the_reported_measurements(
+    services: RecordedServices,
+) -> None:
+    agent, model = build_agent(
+        [
+            interpretation(intent="current", sensor="الحموضة", device_name="جهاز 2"),
+            resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
+            sensor("PH"),
+            "الحموضة 7.4.",
+        ]
+    )
+
+    await run(agent)
+
+    resolver_input = input_of(model, "sensor")
+    assert resolver_input["user_sensor"] == "الحموضة"
+    assert resolver_input["sensors"] == [
+        {"type": "PH", "type_ar": "درجة الحموضة", "unit": "pH"},
+        {"type": "Flow", "type_ar": "معدل التدفق", "unit": "m³/h"},
+    ]

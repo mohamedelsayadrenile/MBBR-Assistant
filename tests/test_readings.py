@@ -60,7 +60,16 @@ async def test_readings_passes_populated_reading_set_through_untouched(
     data = {
         "generated_at": "2026-08-16T09:16:53.011Z",
         "count": 1,
-        "readings": [{"sensor": "water_temperature", "value": 24.7, "unit": "C"}],
+        "readings": [
+            {
+                "sensor_type": "flow_rate",
+                "sensor_type_ar": "معدل التدفق",
+                "measurement_unit": "L/min",
+                "kind": "analog",
+                "value": 217.4,
+                "status": "NORMAL",
+            }
+        ],
     }
     install_fake_client(
         monkeypatch, mbbr_api, json_payload={"success": True, "message": "ok", "data": data}
