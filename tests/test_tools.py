@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from agent.agent import parse_date_range
+from agent.utils import parse_date_range
 
 TODAY = date(2026, 8, 17)
 

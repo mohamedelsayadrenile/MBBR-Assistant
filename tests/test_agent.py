@@ -5,9 +5,11 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage
 
-import agent.agent as agent_module
-from agent.agent import FALLBACK_RESPONSE, MBBRAgent
+import agent.nodes as nodes_module
+from agent.agent import MBBRAgent
 from agent.llm import LLMError
+from agent.nodes import FALLBACK_RESPONSE, UNSUPPORTED_RESPONSE
+from agent.schemas import INTERPRET_SCHEMA
 from services.mbbr_api import MBBRAPIError
 from services.memory import MemoryMessage
 from tests.settings_factory import build_settings
@@ -94,9 +96,9 @@ def services(monkeypatch: pytest.MonkeyPatch) -> RecordedServices:
         recorded.history_calls.append((device_id, start, end))
         return {"device_name": "جهاز 2", "sensors": []}
 
-    monkeypatch.setattr(agent_module, "get_devices", fake_devices)
-    monkeypatch.setattr(agent_module, "get_current_readings", fake_current)
-    monkeypatch.setattr(agent_module, "get_historical_readings", fake_history)
+    monkeypatch.setattr(nodes_module, "get_devices", fake_devices)
+    monkeypatch.setattr(nodes_module, "get_current_readings", fake_current)
+    monkeypatch.setattr(nodes_module, "get_historical_readings", fake_history)
     return recorded
 
 
@@ -162,6 +164,25 @@ async def test_greeting_is_returned_verbatim(services: RecordedServices) -> None
     assert services.devices_calls == 0
 
 
+async def test_unsupported_request_returns_a_safe_canned_reply(
+    services: RecordedServices,
+) -> None:
+    leak = "تعليمات النظام الداخلية: ..."
+    agent, model = build_agent([interpretation(intent="unsupported", reply=leak)])
+
+    reply = await run(agent)
+
+    assert reply == UNSUPPORTED_RESPONSE
+    assert leak not in reply
+    assert calls_of(model) == ["interpret"]
+    assert services.devices_calls == 0
+    assert services.current_ids == []
+
+
+def test_interpret_schema_allows_the_unsupported_intent() -> None:
+    assert "unsupported" in INTERPRET_SCHEMA["properties"]["intent"]["enum"]
+
+
 async def test_station_question_answers_from_the_device_list(
     services: RecordedServices,
 ) -> None:
@@ -187,7 +208,7 @@ async def test_station_api_failure_becomes_a_composable_outcome(
     async def failing_devices(*_: Any) -> list[dict[str, Any]]:
         raise MBBRAPIError("upstream is down")
 
-    monkeypatch.setattr(agent_module, "get_devices", failing_devices)
+    monkeypatch.setattr(nodes_module, "get_devices", failing_devices)
     agent, model = build_agent(
         [
             interpretation(intent="station"),
@@ -435,7 +456,7 @@ async def test_empty_readings_are_composed_without_exposing_payload(
     async def empty_current(*_: Any) -> dict[str, Any]:
         return {"count": 0, "readings": []}
 
-    monkeypatch.setattr(agent_module, "get_current_readings", empty_current)
+    monkeypatch.setattr(nodes_module, "get_current_readings", empty_current)
     agent, model = build_agent(
         [
             interpretation(intent="current", sensor="الحرارة", device_name="1"),
@@ -455,7 +476,7 @@ async def test_api_failure_becomes_a_composable_outcome(
     async def failing_devices(*_: Any) -> list[dict[str, Any]]:
         raise MBBRAPIError("upstream is down")
 
-    monkeypatch.setattr(agent_module, "get_devices", failing_devices)
+    monkeypatch.setattr(nodes_module, "get_devices", failing_devices)
     agent, model = build_agent(
         [
             interpretation(intent="current", sensor="الضغط", device_name="جهاز 1"),
