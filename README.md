@@ -16,7 +16,7 @@ name, a device id, or a reading.
 | Layer | Choice |
 |---|---|
 | API | FastAPI |
-| Agent | LangGraph — bounded interpret → execute → compose workflow |
+| Agent | LangGraph — bounded interpret → validate → execute → compose workflow |
 | ASR | `CohereLabs/cohere-transcribe-arabic-07-2026`, local via `transformers` |
 | LLM | Any OpenAI-compatible endpoint — Qwen API in dev, self-hosted vLLM in prod |
 | TTS | `mohammedaly22/VoiceTut-TTS`, local |
@@ -27,9 +27,9 @@ name, a device id, or a reading.
 ```text
 src/
 ├── agent/
-│   ├── agent.py        # three-node graph, execution, and safety checks
+│   ├── agent.py        # four-node graph, orchestration, and safety checks
 │   ├── llm.py          # ChatOpenAI from settings, LLMError, <think> stripping
-│   └── prompts.py      # shared interpretation and response system prompt
+│   └── prompts.py      # interpret, device-resolver, and compose prompts
 ├── services/
 │   ├── asr/            # interface + factory + providers/cohere.py
 │   ├── tts/            # interface + factory + providers/voicetut.py + voices.py
@@ -184,18 +184,25 @@ or a cloned voice, and startup fails if it names neither.
 The agent is one compiled, bounded graph:
 
 ```text
-interpret → execute → compose → END
+interpret → validate → execute → compose → END
 ```
 
-`interpret` uses LangChain structured output to identify the requested sensor and
-carry conversation context forward. If the operator named a device, it fetches
-the current list and asks the same model to resolve that wording to an id. If no
-device was named, it asks for one without fetching the list. `execute` applies
-date and id safety checks and awaits the current/history service. `compose`
-answers only the requested sensor from the trusted result.
+`interpret` uses LangChain structured output to read the operator's message and
+extract `intent`, `sensor`, `device_name`, and (for historical questions) the
+date range — a pure LLM step that calls no APIs and resolves nothing.
+`validate` is deterministic Python that decides whether a device needs
+resolving this turn. `execute` is the orchestrator: conversational replies and
+missing sensors are answered or asked about without any API call; when a device
+was named it fetches the live list and runs a dedicated LLM device resolver
+(`matched` / `ambiguous` / `not_found`) against that list, verifying the
+returned id before any readings API is touched. `compose` emits a fixed
+clarification when one is still pending, otherwise answers only the requested
+sensor from the trusted result.
 
 There are no model tools, agent loops, retries, worker threads, sync wrappers,
-checkpoints, or custom reducers. Redis remains the only cross-turn memory.
+checkpoints, or custom reducers. There is no Python fuzzy matcher: matching the
+operator's wording to a real device is an LLM resolver step that sees the live
+list. Redis remains the only cross-turn memory.
 
 **The JWT is never in graph state, a prompt, Redis, or a log line.** It is passed
 to API nodes through LangGraph runtime context.
@@ -203,12 +210,13 @@ to API nodes through LangGraph runtime context.
 ### Device selection
 
 The operator picks the device; the assistant never infers it from the measurement.
-A question with no device — and none already established — is routed to a short
-clarification instead of guessing from the requested measurement.
+A question with no device — and none already established — is routed to the fixed
+clarification «تقصد أي جهاز؟» without fetching the list.
 
 The operator's answer ("جهاز 2") arrives on a later turn and Redis holds only
 user/assistant text. The interpretation model recovers the pending request from
-that history, then resolves it against a fresh device list before execution.
+that history, and `execute` then fetches a fresh device list and resolves the
+wording through the device resolver before reading any data.
 
 ### The device the conversation is about
 
@@ -228,13 +236,17 @@ space («جهاز١»), Arabic in latin letters («gehaz 1», «jihaz 1»), numb
 ordinals («الجهاز التاني»), the definite article, the filler words around the name
 («رقم»، «من فضلك»), and ordinary typos.
 
-Reading through those variants and selecting from the live list is the
-interpretation model's job. There is no Python fuzzy matcher.
+Reading through those variants and selecting from the live list is a dedicated
+LLM device-resolver step: after interpretation and a fresh `get_devices` fetch,
+it returns `matched`, `ambiguous`, or `not_found`. `ambiguous` names the top
+two real devices so the assistant can ask «تقصد ... ولا ...؟»; only a verified
+`matched` id ever reaches a readings API.
 
 ### When the device does not exist
 
-Before execution, Python only verifies that the id selected by the model exists
-in the freshly fetched list. No readings API receives an unverified id.
+Before execution, Python only verifies that the id returned by the resolver
+exists in the freshly fetched list. A resolver result that names an id outside
+the list is treated as `not_found`. No readings API receives an unverified id.
 
 ### Measurement support
 
