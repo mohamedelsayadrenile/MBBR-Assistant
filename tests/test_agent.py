@@ -151,6 +151,56 @@ async def test_direct_reply_ends_after_interpretation(
     assert services.devices_calls == 0
 
 
+async def test_greeting_is_returned_verbatim(services: RecordedServices) -> None:
+    greeting = "أهلاً بيك، أنا مساعدك في محطة الماية. إزاي أقدر أساعدك؟"
+    agent, model = build_agent([interpretation(intent="reply", reply=greeting)])
+
+    reply = await run(agent)
+
+    assert reply == greeting
+    assert calls_of(model) == ["interpret"]
+    assert services.devices_calls == 0
+
+
+async def test_station_question_answers_from_the_device_list(
+    services: RecordedServices,
+) -> None:
+    agent, model = build_agent(
+        [
+            interpretation(intent="station"),
+            "المحطة عندها 2 أجهزة: جهاز 1 وجهاز 2.",
+        ]
+    )
+
+    reply = await run(agent)
+
+    assert reply == "المحطة عندها 2 أجهزة: جهاز 1 وجهاز 2."
+    assert services.devices_calls == 1
+    assert services.current_ids == []
+    assert calls_of(model) == ["interpret", "compose"]
+    assert last_input(model)["result"] == {"devices": DEVICES}
+
+
+async def test_station_api_failure_becomes_a_composable_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failing_devices(*_: Any) -> list[dict[str, Any]]:
+        raise MBBRAPIError("upstream is down")
+
+    monkeypatch.setattr(agent_module, "get_devices", failing_devices)
+    agent, model = build_agent(
+        [
+            interpretation(intent="station"),
+            "مش قادر أجيب بيانات المحطة دلوقتي، جرّب كمان شوية.",
+        ]
+    )
+
+    reply = await run(agent)
+
+    assert reply == "مش قادر أجيب بيانات المحطة دلوقتي، جرّب كمان شوية."
+    assert last_input(model)["result"] == {"error": "api_failure"}
+
+
 async def test_current_reading_follows_the_linear_graph(
     services: RecordedServices,
 ) -> None:
@@ -331,6 +381,30 @@ async def test_historical_request_uses_validated_dates(
     await run(agent)
 
     assert services.history_calls == [(DEVICE_2, date(2026, 7, 1), date(2026, 7, 7))]
+
+
+async def test_all_readings_request_fetches_history(
+    services: RecordedServices,
+) -> None:
+    agent, model = build_agent(
+        [
+            interpretation(
+                intent="historical",
+                sensor="all",
+                device_name="تست وتر",
+                from_date="2026-08-18",
+                to_date="2026-08-18",
+            ),
+            resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
+            "امبارح المتوسطات: حرارة 24.7، pH 7.4، عكارة 3.2.",
+        ]
+    )
+
+    reply = await run(agent)
+
+    assert reply == "امبارح المتوسطات: حرارة 24.7، pH 7.4، عكارة 3.2."
+    assert services.history_calls == [(DEVICE_2, date(2026, 8, 18), date(2026, 8, 18))]
+    assert last_input(model)["request"]["sensor"] == "all"
 
 
 async def test_invalid_period_does_not_call_an_api(services: RecordedServices) -> None:

@@ -15,6 +15,7 @@ def test_system_prompt_accepts_the_runtime_date() -> None:
         "`current`",
         "`historical`",
         "`reply`",
+        "`station`",
         "conversational",
         "conversation history",
         "Arabic-Indic",
@@ -24,6 +25,16 @@ def test_system_prompt_accepts_the_runtime_date() -> None:
 )
 def test_system_prompt_contains_its_interpretation_rules(rule: str) -> None:
     assert rule in SYSTEM_PROMPT
+
+
+def test_system_prompt_defines_the_greeting() -> None:
+    greeting = "أهلاً بيك، أنا مساعدك في محطة الماية. إزاي أقدر أساعدك؟"
+    assert greeting in SYSTEM_PROMPT
+
+
+def test_system_prompt_supports_all_readings() -> None:
+    assert '"all"' in SYSTEM_PROMPT
+    assert "القراءات" in SYSTEM_PROMPT
 
 
 def test_system_prompt_keeps_reply_for_conversational_only() -> None:
@@ -66,6 +77,17 @@ def test_compose_prompt_defines_every_result_error() -> None:
         "api_failure",
     ]:
         assert f"`{outcome}`" in COMPOSE_PROMPT
+
+
+def test_compose_prompt_handles_station_questions() -> None:
+    assert "device list (station question)" in COMPOSE_PROMPT
+    assert "never invent" in COMPOSE_PROMPT
+    assert "device count" in COMPOSE_PROMPT
+
+
+def test_compose_prompt_reports_all_readings() -> None:
+    assert '"all"' in COMPOSE_PROMPT
+    assert "every reading present in the payload" in COMPOSE_PROMPT
 
 
 def test_compose_prompt_requires_grounded_spoken_arabic() -> None:

@@ -31,7 +31,6 @@ class AgentState(TypedDict, total=False):
     history: list[MemoryMessage]
     user_message: str
     request: dict[str, Any]
-    device_required: bool
     resolution: dict[str, Any]
     result: Any
     reply: str
@@ -51,11 +50,11 @@ INTERPRET_SCHEMA: dict[str, Any] = {
     "properties": {
         "intent": {
             "type": "string",
-            "enum": ["reply", "current", "historical"],
+            "enum": ["reply", "current", "historical", "station"],
         },
         "sensor": {
             "type": "string",
-            "description": "The measurement the operator asked about.",
+            "description": 'The measurement requested, or "all" for every reading.',
         },
         "device_name": {
             "type": "string",
@@ -111,7 +110,7 @@ def parse_date_range(
 
     def parse(value: str) -> date | None:
         try:
-            return datetime.strptime(value, "%Y-%m-%d").date()
+            return datetime.strptime(value, "%Y-%m-%d").date()  # noqa: DTZ007
         except ValueError:
             return None
 
@@ -137,12 +136,10 @@ class MBBRAgent:
 
         graph = StateGraph(AgentState, context_schema=RunContext)
         graph.add_node("interpret", self._interpret)
-        graph.add_node("validate", self._validate)
         graph.add_node("execute", self._execute)
         graph.add_node("compose", self._compose)
         graph.add_edge(START, "interpret")
-        graph.add_edge("interpret", "validate")
-        graph.add_edge("validate", "execute")
+        graph.add_edge("interpret", "execute")
         graph.add_edge("execute", "compose")
         graph.add_edge("compose", END)
         self._graph = graph.compile()
@@ -205,25 +202,6 @@ class MBBRAgent:
         )
         return {"request": interpretation}
 
-    async def _validate(
-        self, state: AgentState, runtime: Runtime[RunContext]
-    ) -> dict[str, Any]:
-        request = state["request"]
-        intent = request.get("intent")
-        sensor = request.get("sensor")
-        device_name = request.get("device_name")
-        device_required = (
-            intent in {"current", "historical"} and bool(sensor) and bool(device_name)
-        )
-        logger.info(
-            "agent_validation_completed conversation_id=%s intent=%s sensor_present=%s device_required=%s",
-            runtime.context.conversation_id,
-            intent,
-            bool(sensor),
-            device_required,
-        )
-        return {"device_required": device_required}
-
     async def _execute(
         self, state: AgentState, runtime: Runtime[RunContext]
     ) -> dict[str, Any]:
@@ -233,13 +211,36 @@ class MBBRAgent:
         conversation_id = runtime.context.conversation_id
         intent = request.get("intent")
 
+        device_required = (
+            intent in {"current", "historical"}
+            and bool(request.get("sensor"))
+            and bool(request.get("device_name"))
+        )
+        logger.info(
+            "agent_validation_completed conversation_id=%s intent=%s sensor_present=%s device_required=%s",
+            conversation_id,
+            intent,
+            bool(request.get("sensor")),
+            device_required,
+        )
+
         if intent == "reply":
             return {"result": request.get("reply")}
+
+        if intent == "station":
+            try:
+                devices = await get_devices(runtime.context.jwt, self._settings)
+            except MBBRAPIError:
+                logger.exception(
+                    "agent_devices_failed conversation_id=%s", conversation_id
+                )
+                return {"result": {"error": "api_failure"}}
+            return {"result": {"devices": devices}}
 
         if not request.get("sensor"):
             return {"result": {"error": "ask_measurement"}}
 
-        if not state.get("device_required"):
+        if not device_required:
             logger.info(
                 "agent_clarification_required conversation_id=%s", conversation_id
             )

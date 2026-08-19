@@ -16,7 +16,7 @@ name, a device id, or a reading.
 | Layer | Choice |
 |---|---|
 | API | FastAPI |
-| Agent | LangGraph — bounded interpret → validate → execute → compose workflow |
+| Agent | LangGraph — bounded interpret → execute → compose workflow |
 | ASR | `CohereLabs/cohere-transcribe-arabic-07-2026`, local via `transformers` |
 | LLM | Any OpenAI-compatible endpoint — Qwen API in dev, self-hosted vLLM in prod |
 | TTS | `mohammedaly22/VoiceTut-TTS`, local |
@@ -27,7 +27,7 @@ name, a device id, or a reading.
 ```text
 src/
 ├── agent/
-│   ├── agent.py        # four-node graph, orchestration, and safety checks
+│   ├── agent.py        # three-node graph, orchestration, and safety checks
 │   ├── llm.py          # ChatOpenAI from settings, LLMError, <think> stripping
 │   └── prompts.py      # interpret, device-resolver, and compose prompts
 ├── services/
@@ -184,25 +184,26 @@ or a cloned voice, and startup fails if it names neither.
 The agent is one compiled, bounded graph:
 
 ```text
-interpret → validate → execute → compose → END
+interpret → execute → compose → END
 ```
 
 `interpret` uses LangChain structured output to read the operator's message and
 extract `intent`, `sensor`, `device_name`, and (for historical questions) the
 date range — a pure LLM step that calls no APIs and resolves nothing.
-`validate` is deterministic Python that decides whether a device needs
-resolving this turn. `execute` is the orchestrator: conversational replies and
-missing sensors are answered or asked about without any API call; when a device
-was named it fetches the live list and runs a dedicated LLM device resolver
-(`matched` / `ambiguous` / `not_found`) against that list, verifying the
-returned id before any readings API is touched. `compose` emits a fixed
-clarification when one is still pending, otherwise answers only the requested
-sensor from the trusted result.
+`execute` is deterministic Python that routes the turn: `reply` and
+conversational turns are answered or asked about without any API call; a
+`station` question (device count, device names, …) fetches the live list and
+answers only from it; a sensor question resolves the device first — fetching
+the live list and running a dedicated LLM device resolver
+(`matched` / `ambiguous` / `not_found`) against it, verifying the returned id
+before any readings API is touched. `compose` emits a fixed clarification when
+one is still pending, otherwise answers from the trusted result.
 
 There are no model tools, agent loops, retries, worker threads, sync wrappers,
 checkpoints, or custom reducers. There is no Python fuzzy matcher: matching the
 operator's wording to a real device is an LLM resolver step that sees the live
-list. Redis remains the only cross-turn memory.
+list. The assistant never invents data — it answers only from the device list it
+fetched and the readings it retrieved. Redis remains the only cross-turn memory.
 
 **The JWT is never in graph state, a prompt, Redis, or a log line.** It is passed
 to API nodes through LangGraph runtime context.
