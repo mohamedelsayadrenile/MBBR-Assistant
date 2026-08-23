@@ -21,7 +21,7 @@ def build_llm(settings: Settings) -> ChatOpenAI:
         "top_p": settings.llm_top_p,
         "max_retries": 0,
     }
-    extra_body = _build_extra_body(settings)
+    extra_body = None
     if extra_body:
         kwargs["extra_body"] = extra_body
     return ChatOpenAI(**kwargs)
@@ -40,6 +40,6 @@ def _build_extra_body(settings: Settings) -> dict[str, Any]:
 
 def strip_thinking(content: str | None) -> str | None:
     """Drop an inline reasoning block before text reaches TTS."""
-    if not content or "</think>" not in content:
+    if not content or "</thought>" not in content:
         return content
-    return content.rsplit("</think>", maxsplit=1)[-1].strip()
+    return content.rsplit("</thought>", maxsplit=1)[-1].strip()

@@ -40,7 +40,7 @@ def test_model_id_is_normalized_for_chat_openai(model: str) -> None:
 @pytest.mark.parametrize(
     ("content", "expected"),
     [
-        ("<think>reasoning here</think>الرد النهائي", "الرد النهائي"),
+        ("<thought>reasoning here</thought>الرد النهائي", "الرد النهائي"),
         ("مفيش تفكير", "مفيش تفكير"),
         (None, None),
     ],
