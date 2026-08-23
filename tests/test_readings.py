@@ -6,82 +6,99 @@ from services.readings import get_current_readings
 from tests.http_fake import install_fake_client
 from tests.settings_factory import build_settings
 
-DEVICE_ID = "b9eaf606-536b-4f38-a58e-d741cd96155b"
-
-# The real response captured in APIs.ipynb: every device is offline, so the
-# live API returns an empty reading set. This is the common path today.
-EMPTY_READINGS_PAYLOAD = {
-    "success": True,
-    "message": "أحدث القراءات",
-    "data": {"generated_at": "2026-08-16T09:16:53.011Z", "count": 0, "readings": []},
+# The real response captured in test.ipynb, trimmed to two devices: every sensor
+# the device is wired for is listed, with a null value when it has no reading.
+SNAPSHOT = {
+    "generated_at": "2026-08-23T05:04:40.249Z",
+    "count": 2,
+    "devices": [
+        {
+            "device_id": "11111111-1111-4111-8111-111111111111",
+            "device_name": "Test Water Station",
+            "sensors": [
+                {"name": "flow_rate", "value": 217.4, "unit": "L/min"},
+                {"name": "ph", "value": None, "unit": "pH"},
+            ],
+        },
+        {
+            "device_id": "a1000000-0000-4000-8000-000000000009",
+            "device_name": "MBBR Tank A",
+            "sensors": [
+                {"name": "DO", "value": None, "unit": "mg/L"},
+                {"name": "Temperature", "value": None, "unit": "°C"},
+            ],
+        },
+    ],
 }
+PAYLOAD = {"success": True, "message": "أحدث قراءات جميع الأجهزة", "data": SNAPSHOT}
 
 
 async def test_readings_request_forwards_jwt_as_bearer_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    recorded = install_fake_client(monkeypatch, mbbr_api, json_payload=EMPTY_READINGS_PAYLOAD)
+    recorded = install_fake_client(monkeypatch, mbbr_api, json_payload=PAYLOAD)
 
-    await get_current_readings("runtime-jwt", DEVICE_ID, build_settings())
+    await get_current_readings("runtime-jwt", build_settings())
 
     assert recorded.headers["Authorization"] == "Bearer runtime-jwt"
 
 
-async def test_readings_passes_selected_device_id_as_query_param(
+async def test_readings_asks_the_all_devices_endpoint_without_parameters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    recorded = install_fake_client(monkeypatch, mbbr_api, json_payload=EMPTY_READINGS_PAYLOAD)
+    # One call answers for the whole plant, so there is no device to select.
+    recorded = install_fake_client(monkeypatch, mbbr_api, json_payload=PAYLOAD)
 
-    await get_current_readings("runtime-jwt", DEVICE_ID, build_settings())
+    await get_current_readings("runtime-jwt", build_settings())
 
-    assert recorded.path == "/api/readings/latest"
-    assert recorded.params == {"device_id": DEVICE_ID}
+    assert recorded.path == "/api/readings/latest/all"
+    assert recorded.params == {}
 
 
-async def test_readings_returns_empty_reading_set_unchanged(
+async def test_readings_passes_the_snapshot_through_untouched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    install_fake_client(monkeypatch, mbbr_api, json_payload=EMPTY_READINGS_PAYLOAD)
+    # The per-sensor shape is unverified upstream, so the service must not
+    # reformat it — whatever the plant sends reaches the agent as-is.
+    install_fake_client(monkeypatch, mbbr_api, json_payload=PAYLOAD)
 
-    readings = await get_current_readings("runtime-jwt", DEVICE_ID, build_settings())
+    readings = await get_current_readings("runtime-jwt", build_settings())
 
-    assert readings == {
-        "generated_at": "2026-08-16T09:16:53.011Z",
-        "count": 0,
-        "readings": [],
-    }
+    assert readings == SNAPSHOT
 
 
-async def test_readings_passes_populated_reading_set_through_untouched(
+async def test_readings_accepts_an_empty_device_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The per-reading shape is unverified upstream, so the service must not
-    # reformat it — whatever the sensors send reaches the LLM as-is.
-    data = {
-        "generated_at": "2026-08-16T09:16:53.011Z",
-        "count": 1,
-        "readings": [
-            {
-                "sensor_type": "flow_rate",
-                "sensor_type_ar": "معدل التدفق",
-                "measurement_unit": "L/min",
-                "kind": "analog",
-                "value": 217.4,
-                "status": "NORMAL",
-            }
-        ],
-    }
+    data = {"generated_at": "2026-08-23T05:04:40.249Z", "count": 0, "devices": []}
     install_fake_client(
         monkeypatch, mbbr_api, json_payload={"success": True, "message": "ok", "data": data}
     )
 
-    readings = await get_current_readings("runtime-jwt", DEVICE_ID, build_settings())
+    assert await get_current_readings("runtime-jwt", build_settings()) == data
 
-    assert readings == data
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [],
+        {"generated_at": "2026-08-23T05:04:40.249Z", "count": 0},
+        {"devices": "none"},
+    ],
+)
+async def test_readings_raises_without_a_device_list(
+    monkeypatch: pytest.MonkeyPatch, data: object
+) -> None:
+    install_fake_client(
+        monkeypatch, mbbr_api, json_payload={"success": True, "message": "ok", "data": data}
+    )
+
+    with pytest.raises(MBBRAPIError):
+        await get_current_readings("runtime-jwt", build_settings())
 
 
 async def test_readings_raises_on_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
     install_fake_client(monkeypatch, mbbr_api, json_payload={"detail": "nope"}, status_code=404)
 
     with pytest.raises(MBBRAPIError):
-        await get_current_readings("runtime-jwt", DEVICE_ID, build_settings())
+        await get_current_readings("runtime-jwt", build_settings())

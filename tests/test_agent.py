@@ -20,33 +20,29 @@ DEVICES = [
     {"id": DEVICE_1, "name": "جهاز 1"},
     {"id": DEVICE_2, "name": "جهاز 2"},
 ]
-# The real shape, captured from GET /api/readings/latest. Only sensors that
-# actually have a stored reading appear here.
-def reading(sensor_type: str, sensor_type_ar: str, unit: str, value: float) -> dict[str, Any]:
-    return {
-        "device_id": DEVICE_2,
-        "device_name": "جهاز 2",
-        "sensor_id": "43b922f1-a5b1-4882-ba5a-8d908bdcddee",
-        "sensor_type": sensor_type,
-        "sensor_type_ar": sensor_type_ar,
-        "measurement_unit": unit,
-        "kind": "analog",
-        "operational_type": None,
-        "value": value,
-        "status": "NORMAL",
-        "severity": "NORMAL",
-        "operational_status": None,
-        "recorded_at": "2026-08-19T09:16:53.011Z",
-        "quality": "GOOD",
-    }
-
-
-READINGS = {
+# The real shape, captured from GET /api/readings/latest/all: the whole plant in
+# one payload, listing every sensor a device is wired for, with a null value when
+# it has no stored reading.
+SNAPSHOT = {
     "generated_at": "2026-08-19T09:16:53.011Z",
     "count": 2,
-    "readings": [
-        reading("PH", "درجة الحموضة", "pH", 7.4),
-        reading("Flow", "معدل التدفق", "m³/h", 42.0),
+    "devices": [
+        {
+            "device_id": DEVICE_1,
+            "device_name": "جهاز 1",
+            "sensors": [
+                {"name": "Level", "value": 61.1, "unit": "%"},
+                {"name": "Turbidity", "value": None, "unit": "NTU"},
+            ],
+        },
+        {
+            "device_id": DEVICE_2,
+            "device_name": "جهاز 2",
+            "sensors": [
+                {"name": "PH", "value": 7.4, "unit": "pH"},
+                {"name": "Flow", "value": 42.0, "unit": "m³/h"},
+            ],
+        },
     ],
 }
 
@@ -115,7 +111,7 @@ class ScriptedModel:
 class RecordedServices:
     def __init__(self) -> None:
         self.devices_calls = 0
-        self.current_ids: list[str] = []
+        self.current_calls = 0
         self.history_calls: list[tuple[str, date, date]] = []
 
 
@@ -128,10 +124,10 @@ def services(monkeypatch: pytest.MonkeyPatch) -> RecordedServices:
         recorded.devices_calls += 1
         return DEVICES
 
-    async def fake_current(jwt: str, device_id: str, settings: Any) -> dict[str, Any]:
+    async def fake_current(jwt: str, settings: Any) -> dict[str, Any]:
         assert jwt == "runtime-jwt"
-        recorded.current_ids.append(device_id)
-        return READINGS
+        recorded.current_calls += 1
+        return SNAPSHOT
 
     async def fake_history(
         jwt: str, device_id: str, start: date, end: date, settings: Any
@@ -161,6 +157,12 @@ def resolution(**fields: Any) -> dict[str, Any]:
 
 def sensor(sensor_type: str) -> dict[str, Any]:
     return {"sensor_type": sensor_type}
+
+
+def historical(**fields: Any) -> dict[str, Any]:
+    return interpretation(
+        intent="historical", from_date="2026-07-01", to_date="2026-07-07", **fields
+    )
 
 
 async def run(agent: MBBRAgent, history: list[MemoryMessage] | None = None) -> str:
@@ -224,7 +226,7 @@ async def test_unsupported_request_returns_a_safe_canned_reply(
     assert leak not in reply
     assert calls_of(model) == ["interpret"]
     assert services.devices_calls == 0
-    assert services.current_ids == []
+    assert services.current_calls == 0
 
 
 def test_interpret_schema_allows_the_unsupported_intent() -> None:
@@ -245,7 +247,7 @@ async def test_station_question_answers_from_the_device_list(
 
     assert reply == "المحطة عندها 2 أجهزة: جهاز 1 وجهاز 2."
     assert services.devices_calls == 1
-    assert services.current_ids == []
+    assert services.current_calls == 0
     assert calls_of(model) == ["interpret", "compose"]
     assert last_input(model)["result"] == {"devices": DEVICES, "count": 2}
 
@@ -276,8 +278,6 @@ async def test_current_reading_follows_the_linear_graph(
     agent, model = build_agent(
         [
             interpretation(intent="current", sensor="الحموضة", device_name="2"),
-            resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
-            sensor("PH"),
             "الحموضة دلوقتي 7.4.",
         ]
     )
@@ -285,12 +285,29 @@ async def test_current_reading_follows_the_linear_graph(
     reply = await run(agent)
 
     assert reply == "الحموضة دلوقتي 7.4."
-    assert services.devices_calls == 1
-    assert services.current_ids == [DEVICE_2]
-    assert calls_of(model) == ["interpret", "resolve", "sensor", "compose"]
-    resolver_input = input_of(model, "resolve")
-    assert resolver_input["available_devices"] == DEVICES
-    assert resolver_input["user_device"] == "2"
+    # One call, no resolver steps: the snapshot goes straight to the composer.
+    assert services.devices_calls == 0
+    assert services.current_calls == 1
+    assert calls_of(model) == ["interpret", "compose"]
+
+
+async def test_current_reading_hands_the_whole_snapshot_to_the_composer(
+    services: RecordedServices,
+) -> None:
+    # Nothing is resolved, filtered or reshaped on the way: the model gets the
+    # plant as the API returned it and works the answer out itself.
+    agent, model = build_agent(
+        [
+            interpretation(intent="current", sensor="الحموضة", device_name="2"),
+            "الحموضة دلوقتي 7.4.",
+        ]
+    )
+
+    await run(agent)
+
+    composed = last_input(model)
+    assert composed["result"] == {"data": SNAPSHOT}
+    assert "resolution" not in composed
 
 
 async def test_history_is_passed_as_real_chat_roles(services: RecordedServices) -> None:
@@ -301,8 +318,6 @@ async def test_history_is_passed_as_real_chat_roles(services: RecordedServices) 
     agent, model = build_agent(
         [
             interpretation(intent="current", sensor="الحموضة", device_name="2"),
-            resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
-            sensor("PH"),
             "الحموضة 7.4.",
         ]
     )
@@ -329,7 +344,7 @@ async def test_missing_device_asks_clarification_without_fetching(
     assert reply == "تقصد أي جهاز؟"
     assert calls_of(model) == ["interpret"]
     assert services.devices_calls == 0
-    assert services.current_ids == []
+    assert services.current_calls == 0
 
 
 async def test_missing_sensor_asks_readout_without_fetching(
@@ -348,6 +363,71 @@ async def test_missing_sensor_asks_readout_without_fetching(
     assert services.devices_calls == 0
 
 
+async def test_what_a_device_measures_is_a_readings_question(
+    services: RecordedServices,
+) -> None:
+    # «جهاز تست وتر ستيشن بيقيس إيه؟» — one device, no measurement named. It is a
+    # `current` turn with sensor "all", never a `station` one, so it reads the
+    # plant snapshot and never asks the devices API for a count.
+    agent, model = build_agent(
+        [
+            interpretation(
+                intent="current", sensor="all", device_name="تست وتر ستيشن"
+            ),
+            "الجهاز بيقيس التدفق والضغط ومستوى الماية.",
+        ]
+    )
+
+    reply = await run(agent)
+
+    assert reply == "الجهاز بيقيس التدفق والضغط ومستوى الماية."
+    assert services.current_calls == 1
+    assert services.devices_calls == 0
+    assert last_input(model)["result"] == {"data": SNAPSHOT}
+
+
+async def test_follow_up_about_the_same_device_reads_it_again(
+    services: RecordedServices,
+) -> None:
+    # «الجهاز بيقيس إيه تاني؟» — the device comes from the conversation, and the
+    # composer gets both the fresh snapshot and what was already said.
+    history: list[MemoryMessage] = [
+        {"role": "user", "content": "تست وتر ستيشن بيقيس إيه؟"},
+        {"role": "assistant", "content": "بيقيس الحموضة والتدفق."},
+    ]
+    agent, model = build_agent(
+        [
+            interpretation(
+                intent="current", sensor="all", device_name="تست وتر ستيشن"
+            ),
+            "دول كل اللي الجهاز بيقيسه.",
+        ]
+    )
+
+    reply = await run(agent, history)
+
+    assert reply == "دول كل اللي الجهاز بيقيسه."
+    assert services.current_calls == 1
+    composed = last_input(model)
+    assert composed["history"] == history
+    assert composed["result"] == {"data": SNAPSHOT}
+
+
+async def test_compose_sees_no_history_on_a_first_turn(
+    services: RecordedServices,
+) -> None:
+    agent, model = build_agent(
+        [
+            interpretation(intent="current", sensor="الحموضة", device_name="2"),
+            "الحموضة 7.4.",
+        ]
+    )
+
+    await run(agent)
+
+    assert "history" not in last_input(model)
+
+
 async def test_device_follow_up_recovers_the_pending_sensor(
     services: RecordedServices,
 ) -> None:
@@ -358,8 +438,6 @@ async def test_device_follow_up_recovers_the_pending_sensor(
     agent, _ = build_agent(
         [
             interpretation(intent="current", sensor="الحموضة", device_name="جهاز 2"),
-            resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
-            sensor("PH"),
             "الحموضة 7.4.",
         ]
     )
@@ -367,7 +445,7 @@ async def test_device_follow_up_recovers_the_pending_sensor(
     reply = await run(agent, history)
 
     assert reply == "الحموضة 7.4."
-    assert services.current_ids == [DEVICE_2]
+    assert services.current_calls == 1
 
 
 async def test_not_found_device_never_reaches_readings_api(
@@ -375,7 +453,7 @@ async def test_not_found_device_never_reaches_readings_api(
 ) -> None:
     agent, model = build_agent(
         [
-            interpretation(intent="current", sensor="الضغط", device_name="جهاز أحمد"),
+            historical(sensor="الضغط", device_name="جهاز أحمد"),
             resolution(status="not_found"),
             "الجهاز ده مش موجود في المحطة.",
         ]
@@ -385,8 +463,9 @@ async def test_not_found_device_never_reaches_readings_api(
 
     assert reply == "الجهاز ده مش موجود في المحطة."
     assert services.devices_calls == 1
-    assert services.current_ids == []
+    assert services.history_calls == []
     assert calls_of(model) == ["interpret", "resolve", "compose"]
+    assert last_input(model)["result"] == {"error": "device_not_found"}
 
 
 async def test_ambiguous_device_asks_named_clarification(
@@ -394,7 +473,7 @@ async def test_ambiguous_device_asks_named_clarification(
 ) -> None:
     agent, model = build_agent(
         [
-            interpretation(intent="current", sensor="الضغط", device_name="جهاز"),
+            historical(sensor="الضغط", device_name="جهاز"),
             resolution(
                 status="ambiguous",
                 candidates=["جهاز 1", "جهاز 2", "invented name"],
@@ -407,7 +486,7 @@ async def test_ambiguous_device_asks_named_clarification(
     assert reply == "تقصد جهاز 1 ولا جهاز 2؟"
     assert calls_of(model) == ["interpret", "resolve"]
     assert services.devices_calls == 1
-    assert services.current_ids == []
+    assert services.history_calls == []
 
 
 async def test_untrusted_resolver_id_is_treated_as_not_found(
@@ -415,7 +494,7 @@ async def test_untrusted_resolver_id_is_treated_as_not_found(
 ) -> None:
     agent, model = build_agent(
         [
-            interpretation(intent="current", sensor="الضغط", device_name="جهاز 8"),
+            historical(sensor="الضغط", device_name="جهاز 8"),
             resolution(status="matched", device_id="bogus-id", device_name="جهاز 8"),
             "الجهاز ده مش موجود في المحطة.",
         ]
@@ -425,7 +504,7 @@ async def test_untrusted_resolver_id_is_treated_as_not_found(
 
     assert reply == "الجهاز ده مش موجود في المحطة."
     assert services.devices_calls == 1
-    assert services.current_ids == []
+    assert services.history_calls == []
     assert last_input(model)["result"] == {"error": "device_not_found"}
 
 
@@ -498,33 +577,13 @@ async def test_invalid_period_does_not_call_an_api(services: RecordedServices) -
     assert services.history_calls == []
 
 
-async def test_empty_readings_are_composed_without_exposing_payload(
-    monkeypatch: pytest.MonkeyPatch, services: RecordedServices
-) -> None:
-    async def empty_current(*_: Any) -> dict[str, Any]:
-        return {"count": 0, "readings": []}
-
-    monkeypatch.setattr(nodes_module, "get_current_readings", empty_current)
-    agent, model = build_agent(
-        [
-            interpretation(intent="current", sensor="الحرارة", device_name="1"),
-            resolution(status="matched", device_id=DEVICE_1, device_name="جهاز 1"),
-            "مفيش قراءات متاحة للجهاز ده دلوقتي.",
-        ]
-    )
-
-    await run(agent)
-
-    assert last_input(model)["result"] == {"error": "no_readings"}
-
-
 async def test_api_failure_becomes_a_composable_outcome(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def failing_devices(*_: Any) -> list[dict[str, Any]]:
+    async def failing_readings(*_: Any) -> dict[str, Any]:
         raise MBBRAPIError("upstream is down")
 
-    monkeypatch.setattr(nodes_module, "get_devices", failing_devices)
+    monkeypatch.setattr(nodes_module, "get_current_readings", failing_readings)
     agent, model = build_agent(
         [
             interpretation(intent="current", sensor="الضغط", device_name="جهاز 1"),
@@ -550,9 +609,7 @@ async def test_composed_reply_is_cleaned(
 ) -> None:
     agent, _ = build_agent(
         [
-            interpretation(intent="current", sensor="الحموضة", device_name="جهاز 1"),
-            resolution(status="matched", device_id=DEVICE_1, device_name="جهاز 1"),
-            sensor("PH"),
+            interpretation(intent="current", sensor="مستوى الماية", device_name="جهاز 1"),
             content,
         ]
     )
@@ -570,9 +627,7 @@ async def test_model_failure_surfaces_as_llm_error() -> None:
 async def test_jwt_never_enters_model_messages(services: RecordedServices) -> None:
     agent, model = build_agent(
         [
-            interpretation(intent="current", sensor="الحموضة", device_name="جهاز 1"),
-            resolution(status="matched", device_id=DEVICE_1, device_name="جهاز 1"),
-            sensor("PH"),
+            interpretation(intent="current", sensor="مستوى الماية", device_name="جهاز 1"),
             "الحموضة 7.4.",
         ]
     )
@@ -592,7 +647,7 @@ async def test_unsupported_sensor_never_reaches_a_value(
     # جهاز 2 reports pH and flow; the operator asks for temperature.
     agent, model = build_agent(
         [
-            interpretation(intent="current", sensor="الحرارة", device_name="جهاز 2"),
+            historical(sensor="الحرارة", device_name="جهاز 2"),
             resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
             sensor(""),
             "جهاز 2 مش بيقيس الحرارة، بيقيس الحموضة والتدفق.",
@@ -616,7 +671,7 @@ async def test_untrusted_sensor_type_is_treated_as_unsupported(
     # A name the payload does not carry must not survive into the reply.
     agent, model = build_agent(
         [
-            interpretation(intent="current", sensor="الحرارة", device_name="جهاز 2"),
+            historical(sensor="الحرارة", device_name="جهاز 2"),
             resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
             sensor("temperature"),
             "جهاز 2 مش بيقيس الحرارة.",
@@ -626,65 +681,6 @@ async def test_untrusted_sensor_type_is_treated_as_unsupported(
     await run(agent)
 
     assert last_input(model)["result"]["error"] == "sensor_not_supported"
-
-
-async def test_supported_sensor_is_narrowed_to_one_reading(
-    services: RecordedServices,
-) -> None:
-    agent, model = build_agent(
-        [
-            interpretation(intent="current", sensor="الحموضة", device_name="جهاز 2"),
-            resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
-            sensor("PH"),
-            "الحموضة دلوقتي 7.4.",
-        ]
-    )
-
-    await run(agent)
-
-    data = last_input(model)["result"]["data"]
-    assert data["count"] == 1
-    assert [entry["sensor_type"] for entry in data["readings"]] == ["PH"]
-
-
-async def test_sensor_resolution_is_skipped_for_all_readings(
-    services: RecordedServices,
-) -> None:
-    agent, model = build_agent(
-        [
-            interpretation(intent="current", sensor="all", device_name="جهاز 2"),
-            resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
-            "الحموضة 7.4 والتدفق 42.",
-        ]
-    )
-
-    await run(agent)
-
-    assert calls_of(model) == ["interpret", "resolve", "compose"]
-    assert last_input(model)["result"]["data"] == READINGS
-
-
-async def test_empty_payload_skips_sensor_resolution(
-    monkeypatch: pytest.MonkeyPatch, services: RecordedServices
-) -> None:
-    # An offline device sends nothing; that is a missing reading, not a missing
-    # sensor, so the support question is never asked.
-    async def empty_current(*_: Any) -> dict[str, Any]:
-        return {"count": 0, "readings": []}
-
-    monkeypatch.setattr(nodes_module, "get_current_readings", empty_current)
-    agent, model = build_agent(
-        [
-            interpretation(intent="current", sensor="الحرارة", device_name="جهاز 1"),
-            resolution(status="matched", device_id=DEVICE_1, device_name="جهاز 1"),
-            "مفيش قراءات متاحة للجهاز ده دلوقتي.",
-        ]
-    )
-
-    await run(agent)
-
-    assert calls_of(model) == ["interpret", "resolve", "compose"]
-    assert last_input(model)["result"] == {"error": "no_readings"}
 
 
 async def test_historical_sensor_is_narrowed_to_its_own_series(
@@ -740,7 +736,7 @@ async def test_sensor_resolver_sees_only_the_reported_measurements(
 ) -> None:
     agent, model = build_agent(
         [
-            interpretation(intent="current", sensor="الحموضة", device_name="جهاز 2"),
+            historical(sensor="الحموضة", device_name="جهاز 2"),
             resolution(status="matched", device_id=DEVICE_2, device_name="جهاز 2"),
             sensor("PH"),
             "الحموضة 7.4.",

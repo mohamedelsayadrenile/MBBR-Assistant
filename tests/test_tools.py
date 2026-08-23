@@ -4,7 +4,6 @@ import pytest
 
 from agent.utils import (
     match_sensor,
-    narrow_current,
     narrow_daily,
     parse_date_range,
     payload_sensors,
@@ -38,10 +37,10 @@ def test_parse_date_range_rejects_invalid_dates(start: str, end: str) -> None:
 
 
 LATEST = {
-    "count": 2,
-    "readings": [
-        {"sensor_type": "PH", "sensor_type_ar": "درجة الحموضة", "measurement_unit": "pH"},
-        {"sensor_type": "Flow", "sensor_type_ar": "معدل التدفق", "measurement_unit": "m³/h"},
+    "device_name": "Test Water Station",
+    "sensors": [
+        {"name": "PH", "value": 7.4, "unit": "pH"},
+        {"name": "Flow", "value": None, "unit": "m³/h"},
     ],
 }
 DAILY = {
@@ -54,9 +53,10 @@ DAILY = {
 
 
 def test_payload_sensors_reads_the_latest_readings_shape() -> None:
+    # No Arabic name on this endpoint, so the resolver matches on `type` alone.
     assert payload_sensors(LATEST) == [
-        {"type": "PH", "type_ar": "درجة الحموضة", "unit": "pH"},
-        {"type": "Flow", "type_ar": "معدل التدفق", "unit": "m³/h"},
+        {"type": "PH", "type_ar": "", "unit": "pH"},
+        {"type": "Flow", "type_ar": "", "unit": "m³/h"},
     ]
 
 
@@ -69,37 +69,23 @@ def test_payload_sensors_reads_the_daily_averages_shape() -> None:
 
 @pytest.mark.parametrize(
     "payload",
-    [{"count": 0, "readings": []}, {"device_name": "جهاز 1", "sensors": []}, {}],
+    [{"count": 0, "devices": []}, {"device_name": "جهاز 1", "sensors": []}, {}],
 )
 def test_payload_sensors_is_empty_when_nothing_is_reported(payload: dict) -> None:
     assert payload_sensors(payload) == []
 
 
 def test_payload_sensors_skips_entries_without_a_name() -> None:
-    assert payload_sensors({"readings": [{"value": 1.0}, "junk"]}) == []
+    assert payload_sensors({"sensors": [{"value": 1.0}, "junk"]}) == []
 
 
 def test_match_sensor_finds_a_reported_measurement() -> None:
-    assert match_sensor("Flow", payload_sensors(LATEST))["type_ar"] == "معدل التدفق"
+    assert match_sensor("Flow", payload_sensors(LATEST))["unit"] == "m³/h"
 
 
 @pytest.mark.parametrize("sensor_type", ["ph", "temperature", "", None])
 def test_match_sensor_rejects_anything_not_reported(sensor_type: object) -> None:
     assert match_sensor(sensor_type, payload_sensors(LATEST)) is None
-
-
-def test_narrow_current_keeps_one_sensor_and_recomputes_the_count() -> None:
-    narrowed = narrow_current(LATEST, "PH")
-
-    assert narrowed["count"] == 1
-    assert [entry["sensor_type"] for entry in narrowed["readings"]] == ["PH"]
-    assert LATEST["count"] == 2  # the input is never mutated
-
-
-def test_narrow_current_keeps_every_row_of_the_same_sensor() -> None:
-    payload = {"count": 2, "readings": [{"sensor_type": "PH"}, {"sensor_type": "PH"}]}
-
-    assert narrow_current(payload, "PH")["count"] == 2
 
 
 def test_narrow_daily_keeps_one_series() -> None:
@@ -111,5 +97,4 @@ def test_narrow_daily_keeps_one_series() -> None:
 
 
 def test_narrowing_an_unreported_sensor_empties_the_payload() -> None:
-    assert narrow_current(LATEST, "temperature")["readings"] == []
     assert narrow_daily(DAILY, "temperature")["sensors"] == []

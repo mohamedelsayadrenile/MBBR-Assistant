@@ -16,7 +16,6 @@ from agent.schemas import AgentState, RunContext
 from agent.utils import (
     match_by_id,
     match_sensor,
-    narrow_current,
     narrow_daily,
     parse_date_range,
     payload_sensors,
@@ -123,6 +122,18 @@ async def execute(
         )
         return {"result": {"error": "ask_device"}}
 
+    if intent == "current":
+        # API in, raw data out: the whole plant's latest snapshot goes to the
+        # composer, which reads the device and the measurement out of it.
+        try:
+            payload = await get_current_readings(runtime.context.jwt, agent._settings)
+        except MBBRAPIError:
+            logger.exception(
+                "agent_execute_failed conversation_id=%s", conversation_id
+            )
+            return {"result": {"error": "api_failure"}}
+        return {"result": {"data": payload}}
+
     try:
         devices = await get_devices(runtime.context.jwt, agent._settings)
     except MBBRAPIError:
@@ -165,31 +176,25 @@ async def execute(
         device["name"],
     )
 
-    if intent == "historical":
-        if not request.get("from_date") or not request.get("to_date"):
-            return {"result": {"error": "invalid_period"}, "resolution": resolved}
-        date_range = parse_date_range(
-            request["from_date"], request["to_date"], runtime.context.today
-        )
-        if date_range is None:
-            return {"result": {"error": "invalid_period"}, "resolution": resolved}
-        if (date_range[1] - date_range[0]).days >= MAX_RANGE_DAYS:
-            return {"result": {"error": "range_too_long"}, "resolution": resolved}
+    if not request.get("from_date") or not request.get("to_date"):
+        return {"result": {"error": "invalid_period"}, "resolution": resolved}
+    date_range = parse_date_range(
+        request["from_date"], request["to_date"], runtime.context.today
+    )
+    if date_range is None:
+        return {"result": {"error": "invalid_period"}, "resolution": resolved}
+    if (date_range[1] - date_range[0]).days >= MAX_RANGE_DAYS:
+        return {"result": {"error": "range_too_long"}, "resolution": resolved}
 
+    start, end = date_range
     try:
-        if intent == "current":
-            payload = await get_current_readings(
-                runtime.context.jwt, resolved["device_id"], agent._settings
-            )
-        else:
-            start, end = date_range
-            payload = await get_historical_readings(
-                runtime.context.jwt,
-                resolved["device_id"],
-                start,
-                end,
-                agent._settings,
-            )
+        payload = await get_historical_readings(
+            runtime.context.jwt,
+            resolved["device_id"],
+            start,
+            end,
+            agent._settings,
+        )
     except MBBRAPIError:
         logger.exception(
             "agent_execute_failed conversation_id=%s",
@@ -237,13 +242,10 @@ async def execute(
             resolved["device_id"],
             sensor["type"],
         )
-        narrow = narrow_current if intent == "current" else narrow_daily
-        payload = narrow(payload, sensor["type"])
+        payload = narrow_daily(payload, sensor["type"])
         # A daily-averages sensor is listed even with an empty `daily` series, so
         # the narrowed payload can still hold no actual values.
-        if intent == "historical" and not any(
-            entry.get("daily") for entry in payload.get("sensors") or []
-        ):
+        if not any(entry.get("daily") for entry in payload.get("sensors") or []):
             return {"result": {"error": "no_readings"}, "resolution": resolved}
 
     return {
@@ -312,6 +314,10 @@ async def compose(
     }
     if state.get("resolution"):
         prompt_input["resolution"] = state["resolution"]
+    if state["history"]:
+        # Only so a follow-up ("وإيه تاني؟") knows what was already said. Values
+        # still come from `result` alone — the prompt forbids reading data here.
+        prompt_input["history"] = state["history"]
     response = await agent._llm.ainvoke(
         [
             SystemMessage(

@@ -35,7 +35,7 @@ src/
 │   ├── tts/            # interface + factory + providers/voicetut.py + voices.py
 │   ├── mbbr_api.py     # shared GET + Bearer auth + envelope unwrapping
 │   ├── devices.py      # get_devices(jwt, settings)
-│   ├── readings.py     # get_current_readings(jwt, device_id, settings)
+│   ├── readings.py     # get_current_readings(jwt, settings) — the whole plant
 │   ├── history.py      # get_historical_readings(jwt, device_id, start, end, settings)
 │   ├── memory.py       # RedisMemory
 │   └── chat_service.py # one turn: memory → agent → memory → speech
@@ -192,16 +192,32 @@ extract `intent`, `sensor`, `device_name`, and (for historical questions) the
 date range — a pure LLM step that calls no APIs and resolves nothing.
 `execute` is deterministic Python that routes the turn: `reply` and
 conversational turns are answered or asked about without any API call; a
-`station` question (device count, device names, …) fetches the live list and
-answers only from it; a sensor question resolves the device first — fetching
-the live list and running a dedicated LLM device resolver
-(`matched` / `ambiguous` / `not_found`) against it, verifying the returned id
-before any readings API is touched. Once the readings are in, a second small
-resolver matches the requested measurement against what that payload actually
-reports, and Python verifies the answer before the value is read out — see
-[Measurement support](#measurement-support).  `compose` emits a fixed
-clarification when one is still pending, otherwise answers from the trusted
-result.
+`station` question fetches the live list and answers only from it. `station` is
+the plant as a whole — how many devices, what they are called — and never a
+question about one device: «جهاز كذا بيقيس إيه؟» names no measurement but is
+still a readings question, interpreted as `current` with `sensor` = `"all"`.
+
+The two reading paths are deliberately different in shape:
+
+- **Current** is one call and no logic. `/api/readings/latest/all` answers with
+  the whole plant — every device, its id and name, and every sensor it is wired
+  for — so `execute` fetches it and hands the response to `compose` untouched.
+  Identifying the device, finding the measurement, spotting a null value and
+  deciding what to say are all the model's reasoning, steered by the compose
+  prompt. Nothing is resolved, filtered or reshaped on the way.
+- **Historical** keeps the resolver machinery, because `daily-averages` answers
+  for one device over one period and needs a verified id before it is called: a
+  dedicated LLM device resolver (`matched` / `ambiguous` / `not_found`) runs
+  against a fresh `get_devices` list, Python verifies the returned id, and a
+  second small resolver matches the measurement against what the payload reports
+  — see [Measurement support](#measurement-support).
+
+`compose` emits a fixed clarification when one is still pending, otherwise
+answers from the trusted result. It is given the conversation so far for one
+reason only — so a follow-up («وبيقيس إيه تاني؟») can answer with what has not
+been said yet instead of repeating itself. Every value it states still comes from
+this turn's result; the prompt forbids taking a reading, a device or a count from
+the history.
 
 There are no model tools, agent loops, retries, worker threads, sync wrappers,
 checkpoints, or custom reducers. There is no Python fuzzy matcher: matching the
@@ -226,12 +242,16 @@ wording through the device resolver before reading any data.
 ### The device the conversation is about
 
 A conversation is about one device until the operator names another. They say it
-once — «مستوى المياه في جهاز 2 كام؟» — and every follow-up («والضغط كام؟») is about
-جهاز 2 without being asked again.
+once — «مستوى المياه في جهاز 2 كام؟» — and every follow-up («والضغط كام؟»,
+«الجهاز بيقيس إيه تاني؟») is about جهاز 2 without being asked again.
 
 That is the interpretation model's to work out from real LangChain human and
-assistant messages. Nothing about the device is stored separately: Redis holds
-the words, while a stored id could go stale against a device list that can change.
+assistant messages: when a turn points at the device already under discussion
+(«الجهاز», «هو», or a bare follow-up) it copies forward the wording used earlier.
+A bare «الجهاز» with nothing before it names no device, so that turn is asked
+«تقصد أي جهاز؟» instead. Nothing about the device is stored separately: Redis
+holds the words, while a stored id could go stale against a device list that can
+change.
 
 ### Reading the name the operator actually said
 
@@ -241,25 +261,35 @@ space («جهاز١»), Arabic in latin letters («gehaz 1», «jihaz 1»), numb
 ordinals («الجهاز التاني»), the definite article, the filler words around the name
 («رقم»، «من فضلك»), and ordinary typos.
 
-Reading through those variants and selecting from the live list is a dedicated
-LLM device-resolver step: after interpretation and a fresh `get_devices` fetch,
-it returns `matched`, `ambiguous`, or `not_found`. `ambiguous` names the top
-two real devices so the assistant can ask «تقصد ... ولا ...؟»; only a verified
-`matched` id ever reaches a readings API.
+On the historical path, reading through those variants and selecting from the
+live list is a dedicated LLM device-resolver step: after interpretation and a
+fresh `get_devices` fetch it returns `matched`, `ambiguous`, or `not_found`.
+`ambiguous` names the top two real devices so the assistant can ask «تقصد ...
+ولا ...؟»; only a verified `matched` id ever reaches the daily-averages API.
+
+On the current path there is no id to verify — the snapshot already holds every
+device — so the same reading-through-variants job belongs to the composer, which
+sees the real names and answers only from them.
 
 ### When the device does not exist
 
-Before execution, Python only verifies that the id returned by the resolver
-exists in the freshly fetched list. A resolver result that names an id outside
-the list is treated as `not_found`. No readings API receives an unverified id.
+Before a daily-averages call, Python only verifies that the id returned by the
+resolver exists in the freshly fetched list. A resolver result that names an id
+outside the list is treated as `not_found`, so that API never receives an
+unverified id. A current question needs no such check: the request carries no id,
+and the composer answers from the device names in the payload itself.
 
 ### Measurement support
 
 What a device reports **is** the payload it returns: a measurement present in the
-response is available, one absent from it is not. The check is deterministic Python,
-not a prompt judgement.
+response is available, one absent from it is not, and a measurement present with no
+value has simply not been read. That rule holds on both paths; what differs is who
+applies it. On the historical path it is deterministic Python, described below. On
+the current path the whole snapshot is in front of the composer, which applies the
+same rule as a prompt instruction — the reply may name only a device and a sensor
+that are in the payload it was given.
 
-The operator's wording is matched to a reported measurement the same way a device
+On the historical path, the operator's wording is matched to a reported measurement the same way a device
 name is matched to the live list — a small resolver step sees only that device's
 reported measurements (`type`, the Arabic `type_ar`, and the unit) and copies one
 `type` back. `match_sensor` in [utils.py](src/agent/utils.py) then floors the answer
@@ -271,23 +301,25 @@ code, and no alias table or fuzzy matcher exists.
 
 Three outcomes, kept distinct:
 
-- **The measurement is reported.** `narrow_current` / `narrow_daily` reduce the
-  payload to that one measurement — recomputing `count` — before compose sees it, so
-  the reply reads a value that is provably there rather than picking one out of a
-  list.
+- **The measurement is reported.** `narrow_daily` reduces the payload to that one
+  series before compose sees it, so the reply reads a value that is provably there
+  rather than picking one out of a list.
 - **The payload has measurements but not that one** → `sensor_not_supported`, which
   carries the device name and the Arabic names of what it does report. The reply says
   both («جهاز 2 مش بيقيس الحرارة، بيقيس الحموضة والتدفق.»).
-- **The payload is empty** (`count: 0`, or `sensors: []`) → `no_readings`, unchanged.
-  A device that sent nothing has a missing reading, not a missing sensor, so this is
-  never phrased as the device not measuring the thing. A daily-averages sensor listed
-  with an empty `daily` series lands here too.
+- **The payload is empty, or the series holds no averages** → `no_readings`. A device
+  that sent nothing has a missing reading, not a missing sensor, so this is never
+  phrased as the device not measuring the thing.
 
-Note the consequence of using the readings payload as the only source: most devices
-are `offline` and return `count: 0`, so on the current-reading path they fall into the
-`no_readings` case and the support check does not fire. A device reporting only some
-of its sensors will call a real-but-silent one unsupported. This is accepted in
-exchange for having a single source of truth and no extra endpoint.
+The current path reaches the same three answers from the prompt instead: the endpoint
+lists every sensor a device is wired for, with a null value when there is none, so a
+missing sensor and a missing reading are genuinely distinguishable in the payload.
+For an `"all"` question the composer reports the sensors that have values and says
+the rest are unavailable.
+
+The trade is explicit: the current path sends the composer the whole plant — 51
+devices, about 10 KB of JSON — and trusts the model to read it, in exchange for no
+resolver round trips, no filtering code, and one HTTP call per turn.
 
 ## Memory
 
@@ -309,16 +341,15 @@ no GPU.
 
 ## Notes
 
-- **The two readings endpoints name the same fields differently.** A latest reading
-  carries `sensor_type` / `sensor_type_ar` / `measurement_unit` (plus `value`, or
-  `operational_status` and a null unit for a valve or pump); a daily-averages sensor
-  carries `name` / `name_ar` / `unit` / `daily`. `payload_sensors` in
-  [utils.py](src/agent/utils.py) is the only place that knows both, so the support
-  check and the narrowing helpers stay shape-blind. The services still pass `data`
-  through untouched.
-- **`readings/latest` lists only sensors that have a stored reading**, not everything
-  a device is wired for — which is why an empty payload is `no_readings` rather than
-  "measures nothing".
+- **Both readings endpoints name a sensor `name` / `unit`.** Latest carries
+  `{name, value, unit}` (the `value` of a valve or pump is a state, and its unit is
+  null); daily-averages adds `name_ar` and a `daily` series. Only daily-averages has
+  the Arabic name, so `payload_sensors` in [utils.py](src/agent/utils.py) leaves
+  `type_ar` empty for current readings and the sensor resolver matches on `type`
+  there. The services still pass `data` through untouched.
+- **`readings/latest/all` answers for the whole plant in one call**, device ids and
+  names included — which is why the current path needs no device list, no resolver
+  step and no narrowing: it fetches once and hands the response to the composer.
 - **`LLM_TOP_K` and `LLM_ENABLE_THINKING` are vLLM-server extensions.** Leave them
   blank on the Qwen API; when unset they are dropped from the request entirely, so
   a hosted endpoint never sees an unknown field.

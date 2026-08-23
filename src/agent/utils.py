@@ -43,23 +43,14 @@ def real_candidates(candidates: Any, devices: list[dict[str, Any]]) -> list[str]
 
 
 def payload_sensors(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """List the sensors present in a readings payload, whichever shape it has.
+    """List the sensors a daily-averages payload reports.
 
-    The two readings endpoints name the same fields differently — latest uses
-    `sensor_type` / `sensor_type_ar` / `measurement_unit` per reading, while
-    daily-averages uses `name` / `name_ar` / `unit` per sensor. Normalising both
-    here is what keeps the support check and the narrowing helpers shape-blind.
+    Renaming `name` / `name_ar` / `unit` to `type` / `type_ar` / `unit` is what
+    keeps the support check and the narrowing helper from knowing the endpoint's
+    field names. Current readings do not pass through here — the composer reads
+    that payload itself.
     """
     sensors: list[dict[str, Any]] = []
-    for reading in payload.get("readings") or []:
-        if isinstance(reading, dict) and reading.get("sensor_type"):
-            sensors.append(
-                {
-                    "type": str(reading["sensor_type"]),
-                    "type_ar": str(reading.get("sensor_type_ar") or ""),
-                    "unit": reading.get("measurement_unit"),
-                }
-            )
     for sensor in payload.get("sensors") or []:
         if isinstance(sensor, dict) and sensor.get("name"):
             sensors.append(
@@ -85,16 +76,6 @@ def match_sensor(
         if sensor["type"] == sensor_type:
             return sensor
     return None
-
-
-def narrow_current(payload: dict[str, Any], sensor_type: str) -> dict[str, Any]:
-    """Keep only the latest readings for `sensor_type`, count included."""
-    readings = [
-        reading
-        for reading in payload.get("readings") or []
-        if isinstance(reading, dict) and reading.get("sensor_type") == sensor_type
-    ]
-    return {**payload, "count": len(readings), "readings": readings}
 
 
 def narrow_daily(payload: dict[str, Any], sensor_type: str) -> dict[str, Any]:
