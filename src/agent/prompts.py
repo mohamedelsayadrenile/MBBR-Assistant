@@ -88,6 +88,13 @@ Examples:
 → Call `get_current_readings()` and list الأكسجين for every figure
   that has a value for it.
 
+OPEN/CLOSED STATE:
+
+If the operator asks whether a figure is open or closed now, call
+`get_current_readings()` and answer from that figure's `state` flag. If they ask
+whether it was open or closed in a previous time period, follow the PAST READINGS
+rules and call `get_historical_readings()` with a real `figure_id`.
+
 2. Questions about figures themselves are different.
    For questions such as:
    - number of figures
