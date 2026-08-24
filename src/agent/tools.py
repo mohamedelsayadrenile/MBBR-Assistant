@@ -1,7 +1,7 @@
 """The three things the assistant can do.
 
 Each tool calls one API and hands the data back to the model untouched. No
-matching, no filtering, no reshaping — reading a device and a measurement out of
+matching, no filtering, no reshaping — reading a figure and a measurement out of
 a payload is the model's job.
 """
 
@@ -12,7 +12,7 @@ from typing import Any
 from langchain_core.tools import BaseTool, StructuredTool
 
 from core.config import Settings
-from services.devices import get_devices as fetch_devices
+from services.figures import get_figures as fetch_figures
 from services.history import get_historical_readings as fetch_historical_readings
 from services.readings import get_current_readings as fetch_current_readings
 
@@ -29,24 +29,24 @@ RANGE_TOO_LONG = (
 def build_tools(jwt: str, settings: Settings, today: date) -> list[BaseTool]:
     """Build this turn's tools. The JWT rides in the closure, never as a tool argument."""
 
-    async def get_devices() -> str:
-        """List every device in the plant with its id and name."""
-        return _dump(await fetch_devices(jwt, settings))
+    async def get_figures() -> str:
+        """List every figure in the plant with its id and name."""
+        return _dump(await fetch_figures(jwt, settings))
 
     async def get_current_readings() -> str:
         """Read the plant's latest readings.
 
-        Returns every device with every sensor it reports and that sensor's
-        current value. A null value means the device has no reading right now.
+        Returns every figure with every sensor it reports and that sensor's
+        current value. A null value means the figure has no reading right now.
         """
         return _dump(await fetch_current_readings(jwt, settings))
 
     async def get_historical_readings(
-        device_id: str, from_date: str, to_date: str
+        figure_id: str, from_date: str, to_date: str
     ) -> str:
-        """Read the daily average readings of one device over a past period.
+        """Read the daily average readings of one figure over a past period.
 
-        `device_id` must come from `get_devices`. `from_date` and `to_date` are
+        `figure_id` must come from `get_figures`. `from_date` and `to_date` are
         YYYY-MM-DD and at most one month apart.
         """
         period = _parse_period(from_date, to_date, today)
@@ -54,12 +54,12 @@ def build_tools(jwt: str, settings: Settings, today: date) -> list[BaseTool]:
             return period
         start, end = period
         return _dump(
-            await fetch_historical_readings(jwt, device_id, start, end, settings)
+            await fetch_historical_readings(jwt, figure_id, start, end, settings)
         )
 
     return [
         StructuredTool.from_function(coroutine=function)
-        for function in (get_devices, get_current_readings, get_historical_readings)
+        for function in (get_figures, get_current_readings, get_historical_readings)
     ]
 
 

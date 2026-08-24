@@ -6,30 +6,24 @@ from services.readings import get_current_readings
 from tests.http_fake import install_fake_client
 from tests.settings_factory import build_settings
 
-# The real response captured in test.ipynb, trimmed to two devices: every sensor
-# the device is wired for is listed, with a null value when it has no reading.
-SNAPSHOT = {
-    "generated_at": "2026-08-23T05:04:40.249Z",
-    "count": 2,
-    "devices": [
-        {
-            "device_id": "11111111-1111-4111-8111-111111111111",
-            "device_name": "Test Water Station",
-            "sensors": [
-                {"name": "flow_rate", "value": 217.4, "unit": "L/min"},
-                {"name": "ph", "value": None, "unit": "pH"},
-            ],
-        },
-        {
-            "device_id": "a1000000-0000-4000-8000-000000000009",
-            "device_name": "MBBR Tank A",
-            "sensors": [
-                {"name": "DO", "value": None, "unit": "mg/L"},
-                {"name": "Temperature", "value": None, "unit": "°C"},
-            ],
-        },
-    ],
-}
+SNAPSHOT = [
+    {
+        "figureId": "11111111-1111-4111-8111-111111111111",
+        "figureName": "Test Water Station",
+        "sensors": [
+            {"sensorId": "flow", "name": "flow_rate", "value": 217.4, "unit": "L/min"},
+            {"sensorId": "ph", "name": "ph", "value": None, "unit": "pH"},
+        ],
+    },
+    {
+        "figureId": "a1000000-0000-4000-8000-000000000009",
+        "figureName": "MBBR Tank A",
+        "sensors": [
+            {"sensorId": "do", "name": "DO", "value": None, "unit": "mg/L"},
+            {"sensorId": "temp", "name": "Temperature", "value": None, "unit": "°C"},
+        ],
+    },
+]
 PAYLOAD = {"success": True, "message": "أحدث قراءات جميع الأجهزة", "data": SNAPSHOT}
 
 
@@ -51,7 +45,7 @@ async def test_readings_asks_the_all_devices_endpoint_without_parameters(
 
     await get_current_readings("runtime-jwt", build_settings())
 
-    assert recorded.path == "/api/readings/latest/all"
+    assert recorded.path == "/api/figures/readings/latest/"
     assert recorded.params == {}
 
 
@@ -67,26 +61,24 @@ async def test_readings_passes_the_snapshot_through_untouched(
     assert readings == SNAPSHOT
 
 
-async def test_readings_accepts_an_empty_device_list(
+async def test_readings_accepts_an_empty_figure_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    data = {"generated_at": "2026-08-23T05:04:40.249Z", "count": 0, "devices": []}
     install_fake_client(
-        monkeypatch, mbbr_api, json_payload={"success": True, "message": "ok", "data": data}
+        monkeypatch, mbbr_api, json_payload={"success": True, "message": "ok", "data": []}
     )
 
-    assert await get_current_readings("runtime-jwt", build_settings()) == data
+    assert await get_current_readings("runtime-jwt", build_settings()) == []
 
 
 @pytest.mark.parametrize(
     "data",
     [
-        [],
         {"generated_at": "2026-08-23T05:04:40.249Z", "count": 0},
-        {"devices": "none"},
+        {"figures": []},
     ],
 )
-async def test_readings_raises_without_a_device_list(
+async def test_readings_raises_when_data_is_not_a_list(
     monkeypatch: pytest.MonkeyPatch, data: object
 ) -> None:
     install_fake_client(

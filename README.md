@@ -1,15 +1,17 @@
 # MBBR Assistant
 
 A voice chatbot for MBBR wastewater-treatment plant operators. An operator asks a
-question in Egyptian Arabic, the assistant asks which device they mean, reads the
-live values for that device from the MBBR platform, and answers by voice.
+question in Egyptian Arabic, the assistant reads the live values from the MBBR
+platform, and answers by voice. Naming a figure narrows the answer to it; asking
+for a measurement on its own lists it across every figure that reports it. Only a
+question about a past period needs a figure, so there the assistant asks which one.
 
 ```
 Voice → ASR → agent (LLM + tools) → MBBR API → TTS → Voice
 ```
 
-The MBBR API is the only source of truth: the assistant never invents a device
-name, a device id, or a reading.
+The MBBR API is the only source of truth: the assistant never invents a figure
+name, a figure id, or a reading.
 
 ## Tech stack
 
@@ -35,9 +37,9 @@ src/
 │   ├── asr/            # interface + factory + providers/cohere.py
 │   ├── tts/            # interface + factory + providers/voicetut.py + voices.py
 │   ├── mbbr_api.py     # shared GET + Bearer auth + envelope unwrapping
-│   ├── devices.py      # get_devices(jwt, settings)
+│   ├── figures.py      # get_figures(jwt, settings)
 │   ├── readings.py     # get_current_readings(jwt, settings) — the whole plant
-│   ├── history.py      # get_historical_readings(jwt, device_id, start, end, settings)
+│   ├── history.py      # get_historical_readings(jwt, figure_id, start, end, settings)
 │   ├── memory.py       # RedisMemory
 │   └── chat_service.py # one turn: memory → agent → memory → speech
 ├── api/v1/endpoints/{chat.py,voices.py}
@@ -91,7 +93,7 @@ then either record a question with the mic (or upload a
 WAV) and press **Send**, or type one into the chat box at the bottom. A spoken
 question is shown as text and played back as audio; a typed one comes back as text
 only. **New conversation** starts a fresh `conversation_id` so you can test the
-device follow-up flow from scratch.
+figure follow-up flow from scratch.
 
 Point it at a non-default API with `CHAT_API_BASE_URL`, or edit the field in the
 sidebar.
@@ -129,7 +131,7 @@ curl -F conversation_id=c1 -F jwt="$JWT" -F audio=@sample.wav -F voice=Elsayad \
 {
   "conversation_id": "c1",
   "transcript": "عايز درجة حرارة الماية دلوقتي",
-  "reply": "أنهي جهاز؟",
+  "reply": "درجة حرارة الماية في خزان A 24 درجة",
   "audio_base64": "...",
   "audio_content_type": "audio/wav"
 }
@@ -198,12 +200,12 @@ data back untouched:
 
 | Tool | API | Returns |
 |---|---|---|
-| `get_devices()` | `/api/devices` | every device with its id and name |
-| `get_current_readings()` | `/api/readings/latest/all` | the whole plant: every device, every sensor it reports, and its current value |
-| `get_historical_readings(device_id, from_date, to_date)` | `/api/telemetry/daily-averages` | daily averages for one device over a period |
+| `get_figures()` | `/api/telemetry/figures` | every figure with its id and name |
+| `get_current_readings()` | `/api/figures/readings/latest/` | the whole plant: every figure, every sensor it reports, and its current value |
+| `get_historical_readings(figure_id, from_date, to_date)` | `/api/telemetry/figures/daily-averages` | daily averages for one figure over a period |
 
 Understanding the operator is the model's job, not Python's. There is no intent
-classifier, no device resolver, no sensor matcher, no fuzzy matching and no alias
+classifier, no figure resolver, no sensor matcher, no fuzzy matching and no alias
 table. The model reads the operator's wording — typos, Arabic-Indic digits
 («جهاز ١»), Arabic written in latin letters («gehaz 1»), filler words — against
 the real data a tool returned, and decides what answers the question. A follow-up
@@ -226,7 +228,7 @@ Python does four things and nothing else:
 **The JWT is never in a prompt, a tool argument, Redis, or a log line.**
 
 Redis is the only cross-turn memory. Every value the assistant says comes from a
-tool result on that turn — the prompt forbids inventing a device, a reading, a
+tool result on that turn — the prompt forbids inventing a figure, a reading, a
 count, or an id.
 
 ## Memory
@@ -253,9 +255,9 @@ no GPU.
   `{name, value, unit}` (the `value` of a valve or pump is a state, and its unit is
   null); daily-averages adds `name_ar` and a `daily` series. Both payloads reach the
   model exactly as the API returned them.
-- **`readings/latest/all` answers for the whole plant in one call**, device ids and
-  names included — so a current-reading question is one tool call: the model gets
-  the plant and picks the device and the measurement out of it itself.
+- **`figures/readings/latest/` answers for the whole plant in one call**, figure ids
+  and names included — so a current-reading question is one tool call: the model
+  gets the plant and picks the figure and the measurement out of it itself.
 - **`LLM_TOP_K` and `LLM_ENABLE_THINKING` are vLLM-server extensions.** Leave them
   blank on the Qwen API; when unset they are dropped from the request entirely, so
   a hosted endpoint never sees an unknown field.

@@ -19,6 +19,18 @@ def test_extra_body_carries_configured_vllm_knobs() -> None:
     }
 
 
+def test_extra_body_is_omitted_for_gemini_openai_endpoint() -> None:
+    llm = build_llm(
+        build_settings(
+            LLM_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai/",
+            LLM_TOP_K=20,
+            LLM_ENABLE_THINKING=False,
+        )
+    )
+
+    assert llm.extra_body is None
+
+
 def test_settings_reach_chat_openai() -> None:
     llm = build_llm(build_settings())
 
@@ -41,6 +53,9 @@ def test_model_id_is_normalized_for_chat_openai(model: str) -> None:
     ("content", "expected"),
     [
         ("<thought>reasoning here</thought>الرد النهائي", "الرد النهائي"),
+        ("<thought>reasoning here</thought>الرد النهائي</thought>", "الرد النهائي"),
+        ("<thought>reasoning here</thought>الرد\nعلى سطرين</thought>\n", "الرد\nعلى سطرين"),
+        ("<thought>reasoning and nothing else</thought>", ""),
         ("مفيش تفكير", "مفيش تفكير"),
         (None, None),
     ],

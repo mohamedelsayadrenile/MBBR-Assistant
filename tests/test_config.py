@@ -18,9 +18,9 @@ def test_env_example_satisfies_every_required_setting() -> None:
     settings = ExampleSettings()
 
     assert settings.redis_ttl_seconds == 1800
-    assert settings.devices_api_path == "/api/devices"
-    assert settings.current_readings_api_path == "/api/readings/latest/all"
-    assert settings.historical_readings_api_path == "/api/telemetry/daily-averages"
+    assert settings.figures_api_path == "/api/telemetry/figures"
+    assert settings.current_readings_api_path == "/api/figures/readings/latest/"
+    assert settings.historical_readings_api_path == "/api/telemetry/figures/daily-averages"
     assert settings.plant_timezone == "Africa/Cairo"
 
 

@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     memory_max_messages: int = Field(alias="MEMORY_MAX_MESSAGES", gt=0)
 
     mbbr_api_base_url: str = Field(alias="MBBR_API_BASE_URL")
-    devices_api_path: str = Field(alias="DEVICES_API_PATH")
+    figures_api_path: str = Field(alias="FIGURES_API_PATH")
     current_readings_api_path: str = Field(alias="CURRENT_READINGS_API_PATH")
     historical_readings_api_path: str = Field(alias="HISTORICAL_READINGS_API_PATH")
     # Where "today" and "yesterday" are computed, so "امبارح" means the
