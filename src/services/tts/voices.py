@@ -1,11 +1,3 @@
-"""The voices a caller may ask for, and how each one is spoken.
-
-Two kinds sit behind one name. A built-in is one of the speakers shipped inside
-the model repo, selected by name. A custom voice is cloned zero-shot from a clip
-in `assets/voices/` and its transcript -- the model needs both, and a transcript
-that does not match the clip degrades every reply in that voice.
-"""
-
 from dataclasses import dataclass
 from pathlib import Path
 
