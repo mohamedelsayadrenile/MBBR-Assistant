@@ -18,7 +18,7 @@ name, a figure id, or a reading.
 | Layer | Choice |
 |---|---|
 | API | FastAPI |
-| Agent | One LLM with three tools, in a small tool-calling loop |
+| Agent | One LLM with three tools, on LangChain `create_agent` (a LangGraph agent) with middleware |
 | ASR | `CohereLabs/cohere-transcribe-arabic-07-2026`, local via `transformers` |
 | LLM | Any OpenAI-compatible endpoint — Qwen API in dev, self-hosted vLLM in prod |
 | TTS | `mohammedaly22/VoiceTut-TTS`, local |
@@ -29,7 +29,7 @@ name, a figure id, or a reading.
 ```text
 src/
 ├── agent/
-│   ├── agent.py        # the tool-calling loop
+│   ├── agent.py        # create_agent + its middleware
 │   ├── llm.py          # ChatOpenAI from settings, LLMError, <think> stripping
 │   ├── prompts.py      # the system prompt
 │   └── tools.py        # the three tools the model can call
@@ -184,16 +184,26 @@ or a cloned voice, and startup fails if it names neither.
 
 ## Agent
 
-The whole agent is a tool-calling loop:
+The whole agent is LangChain's `create_agent` — a tool-calling loop compiled
+into a LangGraph graph:
 
 ```text
 user message → LLM → tool call if it needs data → LLM → reply
 ```
 
-[agent.py](src/agent/agent.py) builds the message list — the system prompt, the
-conversation so far as real human/assistant messages, then this turn — and loops:
-ask the model, run whatever tools it called, ask again, until it answers with
-text. `MAX_STEPS` bounds the loop.
+[agent.py](src/agent/agent.py) compiles the agent once, at startup. Each turn it
+is invoked with the conversation so far as real human/assistant messages plus
+this turn, and a `TurnContext` (conversation id, JWT, today) as the runtime
+context. It asks the model, runs whatever tools it called, and asks again until
+the model answers with text. Everything else is middleware:
+
+| Middleware | Does |
+|---|---|
+| `_system_prompt` (`@dynamic_prompt`) | puts the system prompt, with today's date, in front of every model call |
+| `_tool_errors` (`@wrap_tool_call`) | logs each tool call, and turns an unknown tool name or an `MBBRAPIError` into a tool result the model can explain |
+| `ModelCallLimitMiddleware` | caps a turn at `MAX_STEPS` model calls; past that the operator gets `FALLBACK_RESPONSE` |
+
+There is no checkpointer: Redis stays the only memory.
 
 The three tools in [tools.py](src/agent/tools.py) each call one API and hand the
 data back untouched:
@@ -215,9 +225,10 @@ not because anything is tracked in Python.
 Python does four things and nothing else:
 
 1. Provides the tools.
-2. Keeps the JWT out of the model's messages. It lives in the closure
-   `build_tools` creates, is never a tool argument, and only ever becomes an
-   `Authorization` header in [mbbr_api.py](src/services/mbbr_api.py).
+2. Keeps the JWT out of the model's messages. It rides in the runtime context,
+   reaches a tool through its injected `ToolRuntime` parameter (which is not part
+   of the schema the model sees), and only ever becomes an `Authorization` header
+   in [mbbr_api.py](src/services/mbbr_api.py).
 3. Runs the tool calls, turning an `MBBRAPIError` into a tool result the model
    can explain rather than a crash.
 4. Checks the one thing that cannot safely be left to the model: that a

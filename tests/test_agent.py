@@ -4,7 +4,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
 
 import agent.tools as tools_module
 from agent.agent import API_FAILURE, FALLBACK_RESPONSE, MAX_STEPS, MBBRAgent
@@ -65,28 +68,31 @@ HISTORY = {
 }
 
 
-class ScriptedModel:
+class ScriptedModel(BaseChatModel):
     """A chat model that replays scripted answers and records what it was sent."""
 
-    def __init__(self, responses: list[Any]) -> None:
-        self.responses = list(responses)
-        self.calls: list[list[BaseMessage]] = []
-        self.tools: list[Any] = []
+    responses: list[Any] = Field(default_factory=list)
+    calls: list[list[BaseMessage]] = Field(default_factory=list)
+    tools: list[Any] = Field(default_factory=list)
 
-    def bind_tools(self, tools: list[Any]) -> "ScriptedModel":
-        self.tools = tools
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def bind_tools(self, tools: Any, **_: Any) -> "ScriptedModel":
+        self.tools = list(tools)
         return self
 
-    async def ainvoke(self, messages: list[BaseMessage]) -> AIMessage:
+    def _generate(self, messages: list[BaseMessage], *_: Any, **__: Any) -> ChatResult:
         self.calls.append(list(messages))
         if not self.responses:
             raise AssertionError("Scripted model ran out of responses")
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
-        if isinstance(response, AIMessage):
-            return response
-        return AIMessage(content=str(response))
+        if not isinstance(response, AIMessage):
+            response = AIMessage(content=str(response))
+        return ChatResult(generations=[ChatGeneration(message=response)])
 
 
 class RecordedServices:
@@ -124,8 +130,8 @@ def services(monkeypatch: pytest.MonkeyPatch) -> RecordedServices:
 
 
 def build_agent(responses: list[Any]) -> tuple[MBBRAgent, ScriptedModel]:
-    model = ScriptedModel(responses)
-    return MBBRAgent(build_settings(), llm=model), model  # type: ignore[arg-type]
+    model = ScriptedModel(responses=responses)
+    return MBBRAgent(build_settings(), llm=model), model
 
 
 def tool_call(name: str, **args: Any) -> AIMessage:

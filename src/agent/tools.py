@@ -6,9 +6,11 @@ a payload is the model's job.
 """
 
 import json
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, StructuredTool
 
 from core.config import Settings
@@ -26,35 +28,49 @@ RANGE_TOO_LONG = (
 )
 
 
-def build_tools(jwt: str, settings: Settings, today: date) -> list[BaseTool]:
-    """Build this turn's tools. The JWT rides in the closure, never as a tool argument."""
+@dataclass(frozen=True)
+class TurnContext:
+    """What one turn knows that the model is never sent: who is asking, and when."""
 
-    async def get_figures() -> str:
+    conversation_id: str
+    jwt: str
+    today: date
+
+
+def build_tools(settings: Settings) -> list[BaseTool]:
+    """Build the tools once. The JWT rides in the runtime context, never as a tool argument."""
+
+    async def get_figures(runtime: ToolRuntime[TurnContext]) -> str:
         """List every figure in the plant with its id and name."""
-        return _dump(await fetch_figures(jwt, settings))
+        return _dump(await fetch_figures(runtime.context.jwt, settings))
 
-    async def get_current_readings() -> str:
+    async def get_current_readings(runtime: ToolRuntime[TurnContext]) -> str:
         """Read the plant's latest readings.
 
         Returns every figure with every sensor it reports and that sensor's
         current value. A null value means the figure has no reading right now.
         """
-        return _dump(await fetch_current_readings(jwt, settings))
+        return _dump(await fetch_current_readings(runtime.context.jwt, settings))
 
     async def get_historical_readings(
-        figure_id: str, from_date: str, to_date: str
+        figure_id: str,
+        from_date: str,
+        to_date: str,
+        runtime: ToolRuntime[TurnContext],
     ) -> str:
         """Read the daily average readings of one figure over a past period.
 
         `figure_id` must come from `get_figures`. `from_date` and `to_date` are
         YYYY-MM-DD and at most one month apart.
         """
-        period = _parse_period(from_date, to_date, today)
+        period = _parse_period(from_date, to_date, runtime.context.today)
         if isinstance(period, str):
             return period
         start, end = period
         return _dump(
-            await fetch_historical_readings(jwt, figure_id, start, end, settings)
+            await fetch_historical_readings(
+                runtime.context.jwt, figure_id, start, end, settings
+            )
         )
 
     return [
