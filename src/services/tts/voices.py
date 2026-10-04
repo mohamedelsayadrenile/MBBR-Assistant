@@ -4,9 +4,7 @@ from pathlib import Path
 VOICES_DIR = Path(__file__).resolve().parents[3] / "assets" / "voices"
 
 # name -> (clip, transcript), both relative to VOICES_DIR.
-CUSTOM_VOICES: dict[str, tuple[str, str]] = {
-    "Elsayad": ("elsayad.wav", "elsayad.txt"),
-}
+CUSTOM_VOICES: dict[str, tuple[str, str]] = {}
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,15 @@
+.git
+.venv
+.env
+.env.*
+**/__pycache__
+.pytest_cache
+.ruff_cache
+src/*.egg-info
+*.ipynb
+*.wav
+tests/
+streamlit_app.py
+CLAUDE.md
+Dockerfile
+docker-compose.yml

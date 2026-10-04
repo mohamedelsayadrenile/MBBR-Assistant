@@ -45,8 +45,6 @@ src/
 ├── api/v1/endpoints/{chat.py,voices.py}
 ├── core/{config.py,logging.py}
 └── main.py
-
-assets/voices/          # elsayad.wav + elsayad.txt, the cloned voice
 ```
 
 `interface + factory + providers/` is used only for the external-provider
@@ -77,6 +75,39 @@ curl localhost:8000/health          # {"status":"ok"}
 The app is started as `main:app`, not `src.main:app` — `src/` is the package root.
 Both the ASR and the TTS model load at startup, one after the other, so the first
 request pays no load cost. Expect `/health` to stay unreachable until they are in.
+
+## Docker
+
+The shipped setup: Redis and the API in Docker Compose, the API on one NVIDIA GPU.
+
+Host prerequisites: Docker with Compose v2, the NVIDIA driver, and the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+CUDA itself ships inside the torch wheels in the image.
+
+```bash
+cp .env.example .env               # fill in the LLM_* values
+docker compose up -d --build
+docker compose logs -f api         # wait for both models to load
+curl localhost:8000/health
+```
+
+- `.env` is read at runtime (`env_file`), never baked into the image. Compose
+  overrides `REDIS_URL` to point at the `redis` service; Redis is not published to
+  the host.
+- Models download from Hugging Face on the first start into the `hf-cache` volume
+  (allow several minutes); later starts reuse it. Redis data lives in `redis-data`.
+- An LLM server on the same host (e.g. vLLM) is reached at
+  `http://host.docker.internal:<port>/v1`, not `localhost`. It must not use port
+  8000, which the API publishes.
+
+To ship the image without a registry:
+
+```bash
+docker save mbbr-assistant:latest | gzip > mbbr-assistant.tar.gz
+# on the customer host, next to docker-compose.yml and .env:
+docker load < mbbr-assistant.tar.gz
+docker compose up -d
+```
 
 ## Manual tester (Streamlit)
 
@@ -123,7 +154,7 @@ curl -F conversation_id=c1 -F jwt="$JWT" -F audio=@sample.wav \
 curl -F conversation_id=c1 -F jwt="$JWT" -F text="عايز درجة حرارة الماية دلوقتي" \
      http://localhost:8000/api/v1/chat
 
-curl -F conversation_id=c1 -F jwt="$JWT" -F audio=@sample.wav -F voice=Elsayad \
+curl -F conversation_id=c1 -F jwt="$JWT" -F audio=@sample.wav -F voice=Mohamed \
      http://localhost:8000/api/v1/chat
 ```
 
@@ -153,7 +184,7 @@ is down, the reply is an Arabic apology, spoken as usual.
 ### `GET /api/v1/voices`
 
 ```json
-{ "voices": ["Abdelrahman", "…", "Elsayad"], "default": "Asmaa" }
+{ "voices": ["Abdelrahman", "…", "Omnia"], "default": "Asmaa" }
 ```
 
 Everything `POST /api/v1/chat` accepts as `voice`, and which one it falls back to.
@@ -169,15 +200,14 @@ Two kinds sit behind one name:
 - The **built-in speakers** ship inside the VoiceTut model repo. The list is read
   off the loaded model rather than hardcoded, so a checkpoint that adds a speaker
   needs no code change.
-- **`Elsayad`** is cloned zero-shot from `assets/voices/elsayad.wav` and its
-  transcript in `assets/voices/elsayad.txt`. The model is given both, and **the
-  transcript must match the clip word for word** — a wrong one does not error, it
-  quietly degrades every reply in that voice. Both files are required at startup;
-  the app refuses to start without them.
-
-Adding another cloned voice means dropping a clip and a transcript into
-`assets/voices/` and naming the pair in `CUSTOM_VOICES` in
-[src/services/tts/voices.py](src/services/tts/voices.py).
+- **Cloned voices** are cloned zero-shot from a clip and its transcript in
+  `assets/voices/`. None ships by default. Adding one means dropping the pair into
+  `assets/voices/`, naming it in `CUSTOM_VOICES` in
+  [src/services/tts/voices.py](src/services/tts/voices.py), and adding
+  `COPY assets/ assets/` to the `Dockerfile`. **The transcript must match the clip
+  word for word** — a wrong one does not error, it quietly degrades every reply in
+  that voice. Both files are required at startup; the app refuses to start without
+  them.
 
 `TTS_DEFAULT_VOICE` picks what an unspecified request gets; it may name a built-in
 or a cloned voice, and startup fails if it names neither.

@@ -12,6 +12,7 @@ uv sync
 docker run -d --name mbbr-redis -p 6379:6379 redis:7-alpine   # Redis is required at startup
 uv run uvicorn main:app --reload          # run from repo root; module is main:app, not src.main:app
 uv run streamlit run streamlit_app.py     # manual voice/text tester, talks to the HTTP API only
+docker compose up -d --build              # shipped setup: Redis + API on one NVIDIA GPU (needs NVIDIA Container Toolkit)
 
 uv run pytest                                          # full suite
 uv run pytest tests/test_agent.py                      # one file
@@ -42,7 +43,11 @@ uv run python -m compileall src                        # syntax check; no linter
 
 ## Voices
 
-TTS built-in speakers are read from the loaded model. Cloned voices are declared in `CUSTOM_VOICES` in `src/services/tts/voices.py` and need `assets/voices/<name>.wav` + a word-for-word matching `.txt` transcript; both are required at startup. `TTS_DEFAULT_VOICE` must name an existing voice or startup fails.
+TTS built-in speakers are read from the loaded model. Cloned voices (none ship today) are declared in `CUSTOM_VOICES` in `src/services/tts/voices.py` and need `assets/voices/<name>.wav` + a word-for-word matching `.txt` transcript, both required at startup; the `Dockerfile` would then also need `COPY assets/ assets/`. `TTS_DEFAULT_VOICE` must name an existing voice or startup fails.
+
+## Docker
+
+The image (`Dockerfile`) installs the locked deps with `uv sync --frozen --no-dev --no-install-project` and runs `uvicorn main:app --app-dir src` with a single worker (each worker would load its own models onto the GPU). `.env` is excluded from the image and passed at runtime via compose `env_file`; HF models are cached in the `hf-cache` volume, not in the image.
 
 ## Tests
 

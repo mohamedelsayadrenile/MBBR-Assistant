@@ -37,6 +37,14 @@ class FakeVoiceTutModel:
         Path(kwargs["output"]).write_bytes(b"fake-wav")
 
 
+@pytest.fixture(autouse=True)
+def custom_voice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Register one cloned voice; none ships by default."""
+    monkeypatch.setattr(
+        voices_module, "CUSTOM_VOICES", {"Elsayad": ("elsayad.wav", "elsayad.txt")}
+    )
+
+
 @pytest.fixture
 def voices_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A stand-in assets/voices/ holding one complete custom voice."""
