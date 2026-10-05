@@ -79,6 +79,7 @@ request pays no load cost. Expect `/health` to stay unreachable until they are i
 ## Docker
 
 The shipped setup: Redis and the API in Docker Compose, the API on one NVIDIA GPU.
+The customer-facing install guide is [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 Host prerequisites: Docker with Compose v2, the NVIDIA driver, and the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
