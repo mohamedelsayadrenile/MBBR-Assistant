@@ -85,7 +85,7 @@ Host prerequisites: Docker with Compose v2, the NVIDIA driver, and the
 CUDA itself ships inside the torch wheels in the image.
 
 ```bash
-cp .env.example .env               # fill in the LLM_* values
+cp .env.example .env               # fill in the LLM_* values and HF_TOKEN
 docker compose up -d --build
 docker compose logs -f api         # wait for both models to load
 curl localhost:8000/health
@@ -95,7 +95,9 @@ curl localhost:8000/health
   overrides `REDIS_URL` to point at the `redis` service; Redis is not published to
   the host.
 - Models download from Hugging Face on the first start into the `hf-cache` volume
-  (allow several minutes); later starts reuse it. Redis data lives in `redis-data`.
+  (allow several minutes); later starts reuse it. The ASR model is gated, so that
+  first start needs internet and an `HF_TOKEN` from an account granted access, or
+  the API restart-loops on a 401. Redis data lives in `redis-data`.
 - An LLM server on the same host (e.g. vLLM) is reached at
   `http://host.docker.internal:<port>/v1`, not `localhost`. It must not use port
   8000, which the API publishes.
@@ -108,6 +110,9 @@ docker save mbbr-assistant:latest | gzip > mbbr-assistant.tar.gz
 docker load < mbbr-assistant.tar.gz
 docker compose up -d
 ```
+
+The customer host also needs internet and `HF_TOKEN` on the first start (the
+models are not in the image).
 
 ## Manual tester (Streamlit)
 

@@ -47,7 +47,7 @@ TTS built-in speakers are read from the loaded model. Cloned voices (none ship t
 
 ## Docker
 
-The image (`Dockerfile`) installs the locked deps with `uv sync --frozen --no-dev --no-install-project` and runs `uvicorn main:app --app-dir src` with a single worker (each worker would load its own models onto the GPU). `.env` is excluded from the image and passed at runtime via compose `env_file`; HF models are cached in the `hf-cache` volume, not in the image.
+The image (`Dockerfile`) installs the locked deps with `uv sync --frozen --no-dev --no-install-project` and runs `uvicorn main:app --app-dir src` with a single worker (each worker would load its own models onto the GPU). `.env` is excluded from the image and passed at runtime via compose `env_file`; HF models are cached in the `hf-cache` volume, not in the image. The ASR model is gated, so the first start needs `HF_TOKEN` in `.env`; huggingface_hub reads it directly, so it is deliberately not a `Settings` field.
 
 ## Tests
 
